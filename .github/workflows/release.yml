@@ -50,7 +50,7 @@ jobs:
     - name: Update permalink hashes in README
       run: |
         CURRENT_HASH=$(git rev-parse HEAD)
-        sed -i "s|/ryanbr/TwitchAdSolutions/[a-f0-9]\{40\}/|/ryanbr/TwitchAdSolutions/${CURRENT_HASH}/|g" README.md
+        sed -i "s|/Helli24/TwitchAdSolutions/[a-f0-9]\{40\}/|/Helli24/TwitchAdSolutions/${CURRENT_HASH}/|g" README.md
         git add README.md
 
     - name: Create version commit and tag

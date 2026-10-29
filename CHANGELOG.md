@@ -1,5 +1,8 @@
 ## Unreleased
 
+### Changed
+- **Fork switched to ryanbr/TwitchAdSolutions as code base** — scripts imported at v68.5.7 with full history. Userscript `@namespace`, `@updateURL` and `@downloadURL`, README links and the release workflow now point to `Helli24/TwitchAdSolutions`, so installed scripts update from this repository only. Issue numbers in the entries below refer to ryanbr/TwitchAdSolutions.
+
 ## v68.5.7 (2026-08-27)
 
 ### Debug Logging

@@ -1,6 +1,8 @@
 # TwitchAdSolutions
 
-Fork of pixeltris/TwitchAdSolutions (archived). Remote `origin` = pixeltris, remote `master` = ryanbr.
+Fork of pixeltris/TwitchAdSolutions (archived). Script code imported from ryanbr/TwitchAdSolutions at v68.5.7 (history preserved). Remote `origin` = Helli24/TwitchAdSolutions; ryanbr is an optional upstream for cherry-picking later fixes (`git remote add ryanbr https://github.com/ryanbr/TwitchAdSolutions.git`).
+
+All userscript `@namespace` / `@updateURL` / `@downloadURL` headers, README links and the release workflow's permalink rewrite must point to `Helli24/TwitchAdSolutions`. When pulling changes from ryanbr, keep these headers on Helli24.
 
 ## Worker Blob Serialization (CRITICAL)
 

@@ -81,10 +81,10 @@ The scripts support runtime configuration via `localStorage`. Set values in the 
 - `true` - hide the "Blocking ads" banner overlay on the video player
 - Not set - banner is visible during ad blocking (default)
 
-**`twitchAdSolutions_pinBackupPlayerType`** (default: `false`)
+**`twitchAdSolutions_pinBackupPlayerType`** (default: `true` for vaft, `false` for video-swap-new)
 - `true` - remember which backup player type worked and try it first on next ad break (saves backup search time)
-- `false` - always iterate through backup types fresh (default)
-- ⚠ **Quality caveat**: if the pinned type is `autoplay`, backups during ad breaks stay at 360p even when a source-quality backup would have worked. Only enable if you prefer consistent ad-break experience over backup quality.
+- `false` - always iterate through backup types fresh
+- `autoplay` (360p) is never pinned, so pinning does not lock ad-break backups to low quality.
 
 **`twitchAdSolutions_reloadCooldownSeconds`** (default: `30`)
 - Minimum seconds between player reloads after ad breaks

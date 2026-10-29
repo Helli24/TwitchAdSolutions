@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (strip) - BAD, DON'T USE THIS
-// @namespace    https://github.com/pixeltris/TwitchAdSolutions
-// @version      1.0
+// @namespace    https://github.com/Helli24/TwitchAdSolutions
+// @version      1.10
 // @description  Multiple solutions for blocking Twitch ads (strip)
-// @updateURL    https://github.com/pixeltris/TwitchAdSolutions/raw/master/strip/strip.user.js
-// @downloadURL  https://github.com/pixeltris/TwitchAdSolutions/raw/master/strip/strip.user.js
-// @author       pixeltris
+// @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/strip/strip.user.js
+// @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/strip/strip.user.js
+// @author       pixeltris (original), ryanbr (fork)
 // @match        *://*.twitch.tv/*
 // @run-at       document-start
 // @inject-into  page
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function() {
     'use strict';
-    const ourTwitchAdSolutionsVersion = 17;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 27;// Used to prevent conflicts with outdated versions of the scripts
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log("skipping strip as there's another script active. ourVersion:" + ourTwitchAdSolutionsVersion + " activeVersion:" + window.twitchAdSolutionsVersion);
         window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
@@ -33,6 +33,7 @@
         scope.M3U8ChannelCache = new Map();
         scope.V2API = false;
     }
+    const loggedCsaiTypes = new Set();
     let localStorageHookFailed = false;
     let adBlockDiv = null;
     const twitchWorkers = [];
@@ -95,7 +96,7 @@
     }
     function hookWindowWorker() {
         const reinsert = getWorkersForReinsert(window.Worker);
-        const newWorker = class Worker extends getCleanWorker(window.Worker) {
+        const newWorker = class Worker extends (getCleanWorker(window.Worker) || window.Worker) {
             constructor(twitchBlobUrl, options) {
                 let isTwitchWorker = false;
                 try {
@@ -105,6 +106,18 @@
                     super(twitchBlobUrl, options);
                     return;
                 }
+                // Pre-check: verify we can fetch the worker JS before injecting
+                let prefetchedWorkerJs = null;
+                try { prefetchedWorkerJs = getWasmWorkerJs(twitchBlobUrl); } catch {}
+                if (!prefetchedWorkerJs) {
+                    super(twitchBlobUrl, options);
+                    console.log('[AD DEBUG] Failed to fetch worker JS — falling back to unmodified worker');
+                    return;
+                }
+                // Blob already carries our hooks: re-injecting would install
+                // hookWorkerFetch twice and double-process every m3u8 response.
+                // Reuse it as-is, but still register below so its messages are heard.
+                const alreadyHooked = prefetchedWorkerJs.includes('hookWorkerFetch');
                 const newBlobStr = `
                     ${stripAdSegments.toString()}
                     ${hookWorkerFetch.toString()}
@@ -123,7 +136,13 @@
                     hookWorkerFetch();
                     eval(workerString);
                 `;
-                super(URL.createObjectURL(new Blob([newBlobStr])), options);
+                if (alreadyHooked) {
+                    super(twitchBlobUrl, options);
+                    console.log('[AD DEBUG] Worker already hooked — reusing without re-injection');
+                } else {
+                    super(URL.createObjectURL(new Blob([newBlobStr])), options);
+                }
+                twitchWorkers.length = 0;
                 twitchWorkers.push(this);
                 this.addEventListener('message', (e) => {
                     if (e.data.key == 'ReloadPlayer') {
@@ -147,10 +166,10 @@
                     const playerRootDiv = document.querySelector('.video-player');
                     let adBlockDiv = null;
                     if (playerRootDiv != null) {
-                        adBlockDiv = playerRootDiv.querySelector('.adblock-overlay');
+                        adBlockDiv = playerRootDiv.querySelector('.tas-adblock-overlay');
                         if (adBlockDiv == null) {
                             adBlockDiv = document.createElement('div');
-                            adBlockDiv.className = 'adblock-overlay';
+                            adBlockDiv.className = 'tas-adblock-overlay';
                             adBlockDiv.innerHTML = '<div class="player-adblock-notice" style="color: white; background-color: rgba(0, 0, 0, 0.8); position: absolute; top: 0px; left: 0px; padding: 5px;"><p></p></div>';
                             adBlockDiv.style.display = 'none';
                             adBlockDiv.P = adBlockDiv.querySelector('p');
@@ -196,14 +215,11 @@
                                 resolve(response);
                             }
                         };
-                        const send = function() {
-                            return realFetch(url, options).then(function(response) {
-                                processAfter(response);
-                            })['catch'](function(err) {
-                                reject(err);
-                            });
-                        };
-                        send();
+                        realFetch(url, options).then(function(response) {
+                            processAfter(response);
+                        })['catch'](function(err) {
+                            reject(err);
+                        });
                     });
                 }
                 if (M3U8Whitelist.has(url)) {
@@ -215,24 +231,21 @@
                                 resolve(response);
                             }
                         };
-                        const send = function() {
-                            return realFetch(url, options).then(function(response) {
-                                processAfter(response);
-                            })['catch'](function(err) {
-                                reject(err);
-                            });
-                        };
-                        send();
+                        realFetch(url, options).then(function(response) {
+                            processAfter(response);
+                        })['catch'](function(err) {
+                            reject(err);
+                        });
                     });
                 } else if (url.includes('/channel/hls/') && !url.includes('picture-by-picture')) {
                     V2API = url.includes('/api/v2/');
                     return new Promise(function(resolve, reject) {
                         const processAfter = async function(response) {
                             if (response.status === 200) {
-                                const channelName = (new URL(url)).pathname.match(/([^\/]+)(?=\.\w+$)/)[0];
+                                const channelName = (new URL(url)).pathname.match(/([^\/]+)(?=\.\w+$)/)?.[0];
                                 let encodingsM3u8 = await response.text();
                                 const cachedM3u8 = M3U8ChannelCache.get(channelName);
-                                if (cachedM3u8 && (await realFetch(cachedM3u8.match(/^https:.*\.m3u8$/m)[0])).status === 200) {
+                                if (cachedM3u8 && (await realFetch(cachedM3u8.match(/^https:.*\.m3u8$/m)?.[0])).status === 200) {
                                     encodingsM3u8 = replaceServerTimeInM3u8(cachedM3u8, getServerTimeFromM3u8(encodingsM3u8));
                                 } else if (encodingsM3u8.includes('.m3u8')) {
                                     M3U8ChannelCache.set(channelName, encodingsM3u8);
@@ -248,14 +261,11 @@
                                 resolve(response);
                             }
                         };
-                        const send = function() {
-                            return realFetch(url, options).then(function(response) {
-                                processAfter(response);
-                            })['catch'](function(err) {
-                                reject(err);
-                            });
-                        };
-                        send();
+                        realFetch(url, options).then(function(response) {
+                            processAfter(response);
+                        })['catch'](function(err) {
+                            reject(err);
+                        });
                     });
                 }
             }
@@ -265,16 +275,16 @@
     function getServerTimeFromM3u8(encodingsM3u8) {
         if (V2API) {
             const matches = encodingsM3u8.match(/#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="([^"]+)"/);
-            return matches.length > 1 ? matches[1] : null;
+            return matches && matches.length > 1 ? matches[1] : null;
         }
-        const matches = encodingsM3u8.match('SERVER-TIME="([0-9.]+)"');
-        return matches.length > 1 ? matches[1] : null;
+        const matches = encodingsM3u8.match(/SERVER-TIME="([0-9.]+)"/);
+        return matches && matches.length > 1 ? matches[1] : null;
     }
     function replaceServerTimeInM3u8(encodingsM3u8, newServerTime) {
         if (V2API) {
             return newServerTime ? encodingsM3u8.replace(/(#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE=")[^"]+(")/, `$1${newServerTime}$2`) : encodingsM3u8;
         }
-        return newServerTime ? encodingsM3u8.replace(new RegExp('(SERVER-TIME=")[0-9.]+"'), `SERVER-TIME="${newServerTime}"`) : encodingsM3u8;
+        return newServerTime ? encodingsM3u8.replace(/(SERVER-TIME=")[0-9.]+"/, `SERVER-TIME="${newServerTime}"`) : encodingsM3u8;
     }
     function stripAdSegments(textStr, stripAllSegments) {
         let hasStrippedAdSegments = false;
@@ -285,9 +295,8 @@
         for (let i = 0; i < lines.length; i++) {
             let line = lines[i];
             // Remove tracking urls which appear in the overlay UI
-            line = line
-                .replaceAll(/(X-TV-TWITCH-AD-URL=")(?:[^"]*)(")/g, `$1${newAdUrl}$2`)
-                .replaceAll(/(X-TV-TWITCH-AD-CLICK-TRACKING-URL=")(?:[^"]*)(")/g, `$1${newAdUrl}$2`);
+            lines[i] = line
+                .replaceAll(/(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g, `$1${newAdUrl}$2`);
             if (i < lines.length - 1 && line.startsWith('#EXTINF') && (!line.includes(',live') || stripAllSegments || AllSegmentsAreAdSegments)) {
                 const segmentUrl = lines[i + 1];
                 if (!AdSegmentCache.has(segmentUrl)) {
@@ -324,7 +333,7 @@
             }
             NumStrippedSegments = 0;
         }
-        AdSegmentCache.forEach((key, value, map) => {
+        AdSegmentCache.forEach((value, key, map) => {
             if (value < Date.now() - 120000) {
                 map.delete(key);
             }
@@ -379,6 +388,13 @@
                                 init.body = JSON.stringify(newBody2);
                             }
                         }
+                    }
+                }
+                if (url.includes('edge.ads.twitch.tv')) {
+                    const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
+                    if (!loggedCsaiTypes.has(csaiType)) {
+                        loggedCsaiTypes.add(csaiType);
+                        console.log('[AD DEBUG] CSAI ad request detected — type: ' + csaiType + ' (client-side ad insertion, not blockable via m3u8)');
                     }
                 }
             }
@@ -438,7 +454,14 @@
         }
         if (isPausePlay) {
             player.pause();
-            player.play();
+            player.play()?.catch?.(() => {});
+            return;
+        }
+        if (document.pictureInPictureElement) {
+            // Downgrade to pause/play to preserve PiP — setSrc exits PiP
+            player.pause();
+            player.play()?.catch?.(() => {});
+            console.log('[AD DEBUG] Downgraded reload to pause/play to preserve PiP');
             return;
         }
         if (LastPlayerReload > Date.now() - ReloadPlayerDelay) {
@@ -465,7 +488,7 @@
         } catch {}
         console.log('Reloading Twitch player');
         playerState.setSrc({ isNewMediaPlayerInstance: true, refreshAccessToken: true });
-        player.play();
+        player.play()?.catch?.(() => {});
         if (localStorageHookFailed && (currentQualityLS || currentMutedLS || currentVolumeLS)) {
             setTimeout(() => {
                 try {
@@ -483,6 +506,9 @@
         }
     }
     function onContentLoaded() {
+        if (document.getElementById('seventv-extension')) {
+            console.log('[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV.');
+        }
         // Hooks for preserving volume / resolution
         try {
             const keysToCache = [
@@ -525,9 +551,28 @@
         postTwitchWorkerMessage('AllSegmentsAreAdSegments');
     };
     declareOptions(window);
+    try {
+        const lsPlayerType = localStorage.getItem('twitchAdSolutions_playerType');
+        if (lsPlayerType !== null) {
+            ForceAccessTokenPlayerType = lsPlayerType;
+        }
+    } catch {}
+    console.log('[AD DEBUG] Config: ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType);
     hookWindowWorker();
     hookFetch();
-    if (document.readyState === "complete" || document.readyState === "loaded" || document.readyState === "interactive") {
+    const realXHROpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
+            const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
+            const xhrKey = csaiType + '-xhr';
+            if (!loggedCsaiTypes.has(xhrKey)) {
+                loggedCsaiTypes.add(xhrKey);
+                console.log('[AD DEBUG] CSAI ad request (XHR) detected — type: ' + csaiType);
+            }
+        }
+        return realXHROpen.apply(this, arguments);
+    };
+    if (document.readyState === "complete" || document.readyState === "interactive") {
         onContentLoaded();
     } else {
         window.addEventListener("DOMContentLoaded", function() {

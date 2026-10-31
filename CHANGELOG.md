@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.7.1 (2026-10-31)
+
+### Debug Logging
+- **Ad-start freeze diagnostics** — field report: with `LowQualityFirst` the 360p backup is committed ~0.2 s after `Ad detected` (warm cache), yet playback freezes ~5 s at the start of every break. Two logs to find where the time goes: (1) `Switch diag` (worker, once per backup switch) compares the committed backup playlist with the native one — segment count and newest `PROGRAM-DATE-TIME` of each, plus the offset between them; a backup whose newest segment lies behind the native one forces the player to wait for new segments. (2) `Playback diag` (main thread) samples the player `<video>` every 250 ms for 12 s after each ad-start and ad-end transition and logs total and longest freeze, when the playhead moved again, the smallest buffer ahead, and a compact readyState/buffer trail. Logging only — no behaviour change. vaft only
+
 ## v68.7.0 (2026-10-31)
 
 ### Changed

@@ -101,6 +101,11 @@ The scripts support runtime configuration via `localStorage`. Set values in the 
 - Set to `false` to disable the autoplay fallback and escape hatch
 - ⚠ **Quality caveat**: autoplay only commits when every Source backup is also ad-laden — rare, but the 360p hit is the tradeoff for avoiding long freezes on SSAI-heavy channels
 
+**`twitchAdSolutions_lowQualityFirst`** (default: `true`, vaft only, this fork)
+- On ad detect, try the `autoplay` (360p) backup before every Source type. Ad breaks play at 360p with sound right away instead of freezing while ad-laden Source backups are probed one by one (~6s each).
+- Falls through to the Source types if the 360p backup itself carries ads.
+- Set to `false` to probe Source types first (full quality during breaks when a clean Source backup exists, at the cost of freezes when none does).
+
 **`twitchAdSolutions_backupSwapFirst`** (default: `true`, vaft only)
 - **Default ad-blocking path** (as of v63.0.0). On ad detect, immediately swap to a backup player-type m3u8 (site → popout → mobile_web → embed, first clean wins). Avoids the MediaSource mixing that the legacy strip+BLANK_MP4+recovery path produces — fewer loading circles and no A/V desync accumulation.
 - Set to `false` to revert to the legacy sticky CSAI strip-first path. Use this if you're on a channel/network where backup fetches are unreliable and stripping native is preferable.
@@ -125,6 +130,7 @@ localStorage.removeItem('twitchAdSolutions_reloadCooldownSeconds');
 localStorage.removeItem('twitchAdSolutions_disableReloadCap');
 localStorage.removeItem('twitchAdSolutions_preferLowQualityBackup');
 localStorage.removeItem('twitchAdSolutions_backupSwapFirst');
+localStorage.removeItem('twitchAdSolutions_lowQualityFirst');
 ```
 
 ## Known Extension Conflicts

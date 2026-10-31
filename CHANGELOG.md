@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.7.0 (2026-10-31)
+
+### Changed
+- **Ad breaks go straight to 360p (`LowQualityFirst`, default on in this fork)** — field log: all four Source backup types (site, popout, mobile_web, embed) were ad-laden; each was committed, then flagged `also has ads` ~6 s later, so the first break of a page session froze for ~30 s before the autoplay (360p) backup won. `FastAutoplayFirstTry` only helps from the second break on. `LowQualityFirst` moves `autoplay` to the front of the backup order on every break, so playback continues at 360p with sound immediately; Source types remain as fallbacks if autoplay is ad-laden. No periodic Source re-probe in this mode. Opt-out: `twitchAdSolutions_lowQualityFirst='false'`. vaft only
+
 ## v68.6.0 (2026-10-31)
 
 ### Fixed

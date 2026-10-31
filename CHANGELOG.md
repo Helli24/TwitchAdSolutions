@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.7.2 (2026-10-31)
+
+### Debug Logging
+- **Playback diag counts decoded video frames** — first field run of the v68.7.1 diagnostics: the backup playlist was aligned with the native one (`+0.0s`), and the playhead never stopped at ad start (`frozen 0.00s`, readyState 4, ~2.2 s buffered throughout), although a ~5 s freeze is reported at every break start. The playhead follows the audio clock, so a frozen picture with running audio is invisible to it. The sampler now also reads `getVideoPlaybackQuality().totalVideoFrames`: the summary reports how long the picture stood still while the playhead moved, and each trail sample carries the frames decoded since the previous sample (`/fN`). Logging only. vaft only
+
 ## v68.7.1 (2026-10-31)
 
 ### Debug Logging

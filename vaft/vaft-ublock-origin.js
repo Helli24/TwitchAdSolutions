@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 96;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 97;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1937,7 +1937,9 @@ twitch-videoad.js text/javascript
     // Poll the player state to detect and fix buffering caused by ad stream switching
     // Switch playback diagnostic. Samples the player's <video> every 250ms for 12s after an ad-start
     // or ad-end transition and logs how long the playhead stood still, when it first moved again,
-    // the smallest buffer ahead of the playhead and a compact sample trail. Logging only.
+    // the smallest buffer ahead of the playhead and a compact sample trail. Also counts decoded video
+    // frames: a playhead that advances (audio clock running) while totalVideoFrames does not is a
+    // frozen picture with sound, which the playhead check alone cannot see. Logging only.
     let switchDiagTimer = null;
     function startSwitchPlaybackDiag(label) {
         if (switchDiagTimer) {
@@ -1953,6 +1955,11 @@ twitch-videoad.js text/javascript
         let firstResumeMs = null;
         let minAhead = Infinity;
         let ticks = 0;
+        let lastFrames = null;
+        let lastTrailFrames = null;
+        let pictureFrozenMs = 0;
+        let pictureRunMs = 0;
+        let longestPictureRunMs = 0;
         const trail = [];
         switchDiagTimer = setInterval(() => {
             ticks++;
@@ -1971,6 +1978,20 @@ twitch-videoad.js text/javascript
                     }
                 } catch {}
                 if (ahead < minAhead) minAhead = ahead;
+                let frames = null;
+                try { frames = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality().totalVideoFrames : null; } catch {}
+                if (lastTime !== null && frames !== null && lastFrames !== null) {
+                    // Playhead advancing but no new decoded frames = frozen picture (audio still playing).
+                    // A frame counter that went down means a new media element/instance — not a freeze.
+                    if (!video.paused && t > lastTime + 0.05 && frames === lastFrames) {
+                        pictureFrozenMs += tickMs;
+                        pictureRunMs += tickMs;
+                        if (pictureRunMs > longestPictureRunMs) longestPictureRunMs = pictureRunMs;
+                    } else {
+                        pictureRunMs = 0;
+                    }
+                }
+                lastFrames = frames;
                 if (lastTime !== null) {
                     const advancing = !video.paused && t > lastTime + 0.05;
                     if (advancing) {
@@ -1984,7 +2005,9 @@ twitch-videoad.js text/javascript
                 }
                 lastTime = t;
                 if (ticks % 2 === 0) {
-                    trail.push((elapsed / 1000).toFixed(1) + 's:rs' + video.readyState + '/' + ahead.toFixed(1) + (video.paused ? 'P' : ''));
+                    const frameDelta = frames !== null && lastTrailFrames !== null ? frames - lastTrailFrames : null;
+                    lastTrailFrames = frames;
+                    trail.push((elapsed / 1000).toFixed(1) + 's:rs' + video.readyState + '/' + ahead.toFixed(1) + (frameDelta !== null ? '/f' + frameDelta : '') + (video.paused ? 'P' : ''));
                 }
             } else if (ticks % 2 === 0) {
                 trail.push((elapsed / 1000).toFixed(1) + 's:no-video');
@@ -1994,8 +2017,9 @@ twitch-videoad.js text/javascript
                 switchDiagTimer = null;
                 console.log('[AD DEBUG] Playback diag (' + label + ') — frozen ' + (frozenMs / 1000).toFixed(2) + 's of 12s, longest freeze ' + (longestRunMs / 1000).toFixed(2) + 's' +
                     (firstResumeMs !== null ? ', playhead moving again at +' + (firstResumeMs / 1000).toFixed(2) + 's' : '') +
-                    ', min buffer ahead ' + (minAhead === Infinity ? 'n/a' : minAhead.toFixed(2) + 's'));
-                console.log('[AD DEBUG] Playback diag trail (' + label + ', time:readyState/bufferAhead[P=paused]): ' + trail.join(' '));
+                    ', min buffer ahead ' + (minAhead === Infinity ? 'n/a' : minAhead.toFixed(2) + 's') +
+                    ', picture frozen while playhead moved ' + (pictureFrozenMs / 1000).toFixed(2) + 's (longest ' + (longestPictureRunMs / 1000).toFixed(2) + 's)');
+                console.log('[AD DEBUG] Playback diag trail (' + label + ', time:readyState/bufferAhead/framesDecodedSinceLastSample[P=paused]): ' + trail.join(' '));
             }
         }, tickMs);
     }

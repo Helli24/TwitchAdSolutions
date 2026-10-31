@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 95;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 96;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -458,6 +458,7 @@ twitch-videoad.js text/javascript
                         updateAdblockBanner(e.data);
                         // Track backup stream switches (start and end of ad break)
                         if (e.data.hasAds !== !!playerBufferState.inAdBreak) {
+                            startSwitchPlaybackDiag(e.data.hasAds ? 'ad start' : 'ad end');
                             playerBufferState.lastBackupSwitchAt = Date.now();
                             // Reset position tracking on ad-end so the stream switch gap isn't detected as a jump
                             if (!e.data.hasAds) {
@@ -1542,6 +1543,25 @@ twitch-videoad.js text/javascript
             // causing buffer reconciliation failures and a forced reload. Check IsShowingAd
             // here to discard stale results.
             if (backupM3u8 && streamInfo.IsShowingAd) {
+                if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
+                    // Switch diagnostic: where the backup playlist's newest segment sits relative to the
+                    // native one. A backup that ends behind (negative offset) or with few segments makes the
+                    // player wait for new segments after the swap — candidate cause of the ad-start freeze.
+                    try {
+                        const newestPdt = (m3u8) => {
+                            const all = m3u8.match(/#EXT-X-PROGRAM-DATE-TIME:[^\n]+/g);
+                            return all ? Date.parse(all[all.length - 1].substring(25)) : NaN;
+                        };
+                        const segCount = (m3u8) => (m3u8.match(/#EXTINF/g) || []).length;
+                        const fmt = (ms) => isNaN(ms) ? 'n/a' : new Date(ms).toISOString().substring(11, 23);
+                        const nativePdt = newestPdt(textStr);
+                        const backupPdt = newestPdt(backupM3u8);
+                        const offset = (backupPdt - nativePdt) / 1000;
+                        console.log('[AD DEBUG] Switch diag — backup (' + backupPlayerType + '): ' + segCount(backupM3u8) + ' segs, newest ' + fmt(backupPdt) +
+                            ' | native: ' + segCount(textStr) + ' segs, newest ' + fmt(nativePdt) +
+                            ' | backup newest ' + (isNaN(offset) ? 'n/a' : (offset >= 0 ? '+' : '') + offset.toFixed(1) + 's') + ' vs native');
+                    } catch {}
+                }
                 textStr = backupM3u8;
                 streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
@@ -1915,6 +1935,70 @@ twitch-videoad.js text/javascript
         vaftEverUnmuted: false
     };
     // Poll the player state to detect and fix buffering caused by ad stream switching
+    // Switch playback diagnostic. Samples the player's <video> every 250ms for 12s after an ad-start
+    // or ad-end transition and logs how long the playhead stood still, when it first moved again,
+    // the smallest buffer ahead of the playhead and a compact sample trail. Logging only.
+    let switchDiagTimer = null;
+    function startSwitchPlaybackDiag(label) {
+        if (switchDiagTimer) {
+            clearInterval(switchDiagTimer);
+            switchDiagTimer = null;
+        }
+        const startedAt = Date.now();
+        const tickMs = 250;
+        let lastTime = null;
+        let frozenMs = 0;
+        let runMs = 0;
+        let longestRunMs = 0;
+        let firstResumeMs = null;
+        let minAhead = Infinity;
+        let ticks = 0;
+        const trail = [];
+        switchDiagTimer = setInterval(() => {
+            ticks++;
+            const elapsed = Date.now() - startedAt;
+            let video = null;
+            try { video = getPlayerVideoElement(); } catch {}
+            if (video) {
+                const t = video.currentTime;
+                let ahead = 0;
+                try {
+                    for (let i = 0; i < video.buffered.length; i++) {
+                        if (video.buffered.start(i) <= t + 0.1 && video.buffered.end(i) > t) {
+                            ahead = video.buffered.end(i) - t;
+                            break;
+                        }
+                    }
+                } catch {}
+                if (ahead < minAhead) minAhead = ahead;
+                if (lastTime !== null) {
+                    const advancing = !video.paused && t > lastTime + 0.05;
+                    if (advancing) {
+                        if (firstResumeMs === null && frozenMs > 0) firstResumeMs = elapsed;
+                        runMs = 0;
+                    } else {
+                        frozenMs += tickMs;
+                        runMs += tickMs;
+                        if (runMs > longestRunMs) longestRunMs = runMs;
+                    }
+                }
+                lastTime = t;
+                if (ticks % 2 === 0) {
+                    trail.push((elapsed / 1000).toFixed(1) + 's:rs' + video.readyState + '/' + ahead.toFixed(1) + (video.paused ? 'P' : ''));
+                }
+            } else if (ticks % 2 === 0) {
+                trail.push((elapsed / 1000).toFixed(1) + 's:no-video');
+            }
+            if (elapsed >= 12000) {
+                clearInterval(switchDiagTimer);
+                switchDiagTimer = null;
+                console.log('[AD DEBUG] Playback diag (' + label + ') — frozen ' + (frozenMs / 1000).toFixed(2) + 's of 12s, longest freeze ' + (longestRunMs / 1000).toFixed(2) + 's' +
+                    (firstResumeMs !== null ? ', playhead moving again at +' + (firstResumeMs / 1000).toFixed(2) + 's' : '') +
+                    ', min buffer ahead ' + (minAhead === Infinity ? 'n/a' : minAhead.toFixed(2) + 's'));
+                console.log('[AD DEBUG] Playback diag trail (' + label + ', time:readyState/bufferAhead[P=paused]): ' + trail.join(' '));
+            }
+        }, tickMs);
+    }
     // Unhooked-worker recovery. The userscript manager can inject vaft after Twitch has already
     // constructed its player worker (document-start is not guaranteed). That worker never runs
     // hookWorkerFetch, so no ad break is ever detected and SSAI ads play unblocked for the whole

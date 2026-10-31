@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.6.0 (2026-10-31)
+
+### Fixed
+- **Ads played unblocked when the player started before vaft loaded** — the userscript manager does not guarantee `document-start`, so on some page loads Twitch constructed its player worker before `hookWindowWorker()` replaced `window.Worker`. That worker never ran `hookWorkerFetch`, so no ad break was ever detected and every SSAI ad played for the rest of the page session; the only symptom in the log was a missing `Worker intercepted` line. The buffer-monitor tick now checks whether the active player's worker (`player.core.worker`) is one vaft hooked (tracked in a `WeakSet`). If it is not and playback has run for 5 s, the player is hard-reloaded once with the new reload kind `'worker-recovery'` (new media player instance + token refresh, bypassing the healthy-player skip), so Twitch constructs a new worker through the hooked constructor. Capped at 2 reloads per page load, skipped while paused, hidden or in PiP. Logs `Player worker was created before vaft loaded` when it fires. Mirrors GosuDRM/TTV-AB 25.0.2. vaft only
+
 ### Changed
 - **Fork switched to ryanbr/TwitchAdSolutions as code base** — scripts imported at v68.5.7 with full history. Userscript `@namespace`, `@updateURL` and `@downloadURL`, README links and the release workflow now point to `Helli24/TwitchAdSolutions`, so installed scripts update from this repository only. Issue numbers in the entries below refer to ryanbr/TwitchAdSolutions.
 

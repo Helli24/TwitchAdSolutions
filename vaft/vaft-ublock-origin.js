@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 97;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 98;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1553,12 +1553,19 @@ twitch-videoad.js text/javascript
                             return all ? Date.parse(all[all.length - 1].substring(25)) : NaN;
                         };
                         const segCount = (m3u8) => (m3u8.match(/#EXTINF/g) || []).length;
+                        // Media-sequence range (first..last): IVS may order segments by sequence number, so a
+                        // backup numbered below the native playlist could look "already played" after the swap.
+                        const seqRange = (m3u8) => {
+                            const first = parseInt((m3u8.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
+                            return isNaN(first) ? 'seq n/a' : 'seq ' + first + '..' + (first + segCount(m3u8) - 1);
+                        };
+                        const discSeq = (m3u8) => (m3u8.match(/#EXT-X-DISCONTINUITY-SEQUENCE:(\d+)/) || [])[1] || '0';
                         const fmt = (ms) => isNaN(ms) ? 'n/a' : new Date(ms).toISOString().substring(11, 23);
                         const nativePdt = newestPdt(textStr);
                         const backupPdt = newestPdt(backupM3u8);
                         const offset = (backupPdt - nativePdt) / 1000;
-                        console.log('[AD DEBUG] Switch diag — backup (' + backupPlayerType + '): ' + segCount(backupM3u8) + ' segs, newest ' + fmt(backupPdt) +
-                            ' | native: ' + segCount(textStr) + ' segs, newest ' + fmt(nativePdt) +
+                        console.log('[AD DEBUG] Switch diag — backup (' + backupPlayerType + '): ' + segCount(backupM3u8) + ' segs, ' + seqRange(backupM3u8) + ', disc-seq ' + discSeq(backupM3u8) + ', newest ' + fmt(backupPdt) +
+                            ' | native: ' + segCount(textStr) + ' segs, ' + seqRange(textStr) + ', disc-seq ' + discSeq(textStr) + ', newest ' + fmt(nativePdt) +
                             ' | backup newest ' + (isNaN(offset) ? 'n/a' : (offset >= 0 ? '+' : '') + offset.toFixed(1) + 's') + ' vs native');
                     } catch {}
                 }
@@ -1935,7 +1942,7 @@ twitch-videoad.js text/javascript
         vaftEverUnmuted: false
     };
     // Poll the player state to detect and fix buffering caused by ad stream switching
-    // Switch playback diagnostic. Samples the player's <video> every 250ms for 12s after an ad-start
+    // Switch playback diagnostic. Samples the player's <video> every 250ms for 20s after an ad-start
     // or ad-end transition and logs how long the playhead stood still, when it first moved again,
     // the smallest buffer ahead of the playhead and a compact sample trail. Also counts decoded video
     // frames: a playhead that advances (audio clock running) while totalVideoFrames does not is a
@@ -2012,10 +2019,10 @@ twitch-videoad.js text/javascript
             } else if (ticks % 2 === 0) {
                 trail.push((elapsed / 1000).toFixed(1) + 's:no-video');
             }
-            if (elapsed >= 12000) {
+            if (elapsed >= 20000) {
                 clearInterval(switchDiagTimer);
                 switchDiagTimer = null;
-                console.log('[AD DEBUG] Playback diag (' + label + ') — frozen ' + (frozenMs / 1000).toFixed(2) + 's of 12s, longest freeze ' + (longestRunMs / 1000).toFixed(2) + 's' +
+                console.log('[AD DEBUG] Playback diag (' + label + ') — frozen ' + (frozenMs / 1000).toFixed(2) + 's of 20s, longest freeze ' + (longestRunMs / 1000).toFixed(2) + 's' +
                     (firstResumeMs !== null ? ', playhead moving again at +' + (firstResumeMs / 1000).toFixed(2) + 's' : '') +
                     ', min buffer ahead ' + (minAhead === Infinity ? 'n/a' : minAhead.toFixed(2) + 's') +
                     ', picture frozen while playhead moved ' + (pictureFrozenMs / 1000).toFixed(2) + 's (longest ' + (longestPictureRunMs / 1000).toFixed(2) + 's)');

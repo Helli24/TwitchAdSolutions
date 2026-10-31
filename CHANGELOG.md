@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.8.0 (2026-10-31)
+
+### Fixed
+- **10-30 s freeze at ad start when the backup playlist is numbered below the native one** — the v68.7.x diagnostics pinned it down. Switches whose backup carried the same media-sequence numbers as native (`seq 9009..9022` on both) played through without a stall. Switches where the numbering differed (backup `10630..10643` vs native `10640..10654`; backup `11169..11182` vs native `11182..11196`, newest PDTs within 1.4 s) stalled: the player appended nothing after the swap, drained its 1-2 s buffer and sat at `readyState` 2 with 0 decoded frames for the remaining 17-18 s of the 20 s window. The player keys segments by media sequence, so a lower-numbered backup looks already played until its numbers pass native. New option `AlignBackupSequence` (fork default on): at each backup switch the offset between both numberings is fixed by matching the newest segments via `PROGRAM-DATE-TIME` (rounded down, so the first new backup segment overlaps rather than leaving a gap), and `#EXT-X-MEDIA-SEQUENCE` / `#EXT-X-TWITCH-LIVE-SEQUENCE` of every backup poll in that break are shifted by it. Logs `Aligning backup media sequence by +N`. Opt-out: `twitchAdSolutions_alignBackupSequence='false'`. vaft only
+
 ## v68.7.3 (2026-10-31)
 
 ### Debug Logging

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/Helli24/TwitchAdSolutions
-// @version      68.7.3
+// @version      68.8.0
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 98;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 99;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -93,6 +93,7 @@
         scope.PreferLowQualityBackup = true;// Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.
         scope.FastAutoplayFirstTry = true;// When the prior break committed autoplay-via-escape-hatch, prepend autoplay (360p) to position 0 of playerTypesToTry on the next break — autoplay wins on first probe (~340ms) instead of cycling through 4 Source types (~1.5-2s). Auto-resets when a Source-tier type wins (channel recovered), so quality returns to full automatically if Twitch ever brings back non-ad-laden Source backups. Default on as of v67.1.0 — field data (project_all_channels_csai_only_marked) confirms every observed channel exhausts Source-tier on every break. Opt-out via localStorage twitchAdSolutions_fastAutoplayFirstTry=false.
         scope.LowQualityFirst = true;// Fork default: on ad detect probe autoplay (360p) before every Source type, so ad breaks play at 360p with sound instead of a freeze while ad-laden Source backups are probed one by one. Falls through to Source types if autoplay itself is ad-laden. Opt-out: twitchAdSolutions_lowQualityFirst=false
+        scope.AlignBackupSequence = true;// Fork default: renumber the committed backup playlist's #EXT-X-MEDIA-SEQUENCE onto the native numbering (matched by PROGRAM-DATE-TIME). A backup numbered below native is treated by the player as already played, so nothing is appended until its numbers pass native: 10-30s freeze at ad start. Opt-out: twitchAdSolutions_alignBackupSequence=false
         scope.BackupSwapFirst = true;// On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
         scope.DisableAdSpoofing = true;// Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
         scope.RecoverFromSilentMute = true;// On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, treat it as a silent Twitch re-mute and recover via the backstop. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable (useful for users who deliberately mute mid-session).
@@ -201,6 +202,7 @@
             // Hybrid-mode state (PreferLowQualityBackup)
             EscapeHatchFired: false,
             LastBreakUsedEscapeHatch: false,// FastAutoplayFirstTry: set when a break commits autoplay via PreferLowQualityBackup escape hatch (= all 4 Source types contaminated this break). Read at next break's backup-search entry to prepend autoplay first. Reset when a Source-tier type wins (channel recovered).
+            BackupSequenceOffset: null,// AlignBackupSequence: media-sequence offset (native - backup) fixed at the backup switch, applied to every backup poll of the break; null = not computed
             FastAutoplayConsecutive: 0,// Count of consecutive breaks won by fast-autoplay without testing Source-tier. Triggers periodic re-probe to detect channel recovery (Twitch reversing CSAI delivery). Reset when full Source-tier probe runs or Source-tier wins.
             // Reload cooldown
             LastPlayerReload: 0,
@@ -386,6 +388,7 @@
                     PreferLowQualityBackup = ${PreferLowQualityBackup};
                     FastAutoplayFirstTry = ${FastAutoplayFirstTry};
                     LowQualityFirst = ${LowQualityFirst};
+                    AlignBackupSequence = ${AlignBackupSequence};
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
                     SoftReloadNoStrip = ${SoftReloadNoStrip};
@@ -1676,6 +1679,48 @@
                             ' | backup newest ' + (isNaN(offset) ? 'n/a' : (offset >= 0 ? '+' : '') + offset.toFixed(1) + 's') + ' vs native');
                     } catch {}
                 }
+                // AlignBackupSequence: the backup playlist can be numbered differently from the native one
+                // (field: backup seq 10630..10643 vs native 10640..10654 with nearly equal PDTs). The player
+                // keys segments by media sequence, so a lower-numbered backup looks already played and nothing
+                // is appended until the backup numbers pass native — the buffer drains and playback freezes for
+                // 10-30s. Fix the offset once per switch by matching the newest segment of both playlists via
+                // PROGRAM-DATE-TIME (rounded down, so the first new backup segment overlaps instead of leaving a
+                // gap), then shift #EXT-X-MEDIA-SEQUENCE (and Twitch's LIVE-SEQUENCE) on every backup poll.
+                if (AlignBackupSequence) {
+                    try {
+                        if (streamInfo.ActiveBackupPlayerType != backupPlayerType || streamInfo.BackupSequenceOffset === null) {
+                            const seqInfo = (m3u8) => {
+                                const first = parseInt((m3u8.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
+                                const count = (m3u8.match(/#EXTINF/g) || []).length;
+                                const pdts = m3u8.match(/#EXT-X-PROGRAM-DATE-TIME:[^\n]+/g);
+                                const segDur = parseFloat((m3u8.match(/#EXTINF:([\d.]+)/) || [])[1]);
+                                return {
+                                    first: first,
+                                    last: first + count - 1,
+                                    newest: pdts ? Date.parse(pdts[pdts.length - 1].substring(25)) : NaN,
+                                    segDur: segDur > 0 ? segDur : 2
+                                };
+                            };
+                            const nativeInfo = seqInfo(textStr);
+                            const backupInfo = seqInfo(backupM3u8);
+                            let offset = 0;
+                            if (!isNaN(nativeInfo.last) && !isNaN(backupInfo.last) && !isNaN(nativeInfo.newest) && !isNaN(backupInfo.newest)) {
+                                offset = (nativeInfo.last - backupInfo.last) - Math.floor((nativeInfo.newest - backupInfo.newest) / 1000 / backupInfo.segDur);
+                            }
+                            streamInfo.BackupSequenceOffset = offset;
+                            if (offset !== 0) {
+                                console.log('[AD DEBUG] Aligning backup media sequence by ' + (offset > 0 ? '+' : '') + offset + ' (backup ' + backupInfo.first + '..' + backupInfo.last + ' → ' + (backupInfo.first + offset) + '..' + (backupInfo.last + offset) + ', native ' + nativeInfo.first + '..' + nativeInfo.last + ')');
+                            }
+                        }
+                        const seqOffset = streamInfo.BackupSequenceOffset;
+                        if (seqOffset) {
+                            backupM3u8 = backupM3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + (parseInt(seq) + seqOffset))
+                                .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + (parseInt(seq) + seqOffset));
+                        }
+                    } catch (err) {
+                        console.log('[AD DEBUG] Backup sequence alignment failed: ' + err.message);
+                    }
+                }
                 textStr = backupM3u8;
                 streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
@@ -1842,6 +1887,7 @@
                 streamInfo.LoggedFastAutoplayThisBreak = false;
                 streamInfo.LoggedFastAutoplayReprobeThisBreak = false;
                 streamInfo.LoggedLowQualityFirstThisBreak = false;
+                streamInfo.BackupSequenceOffset = null;
                 // CSAI-only ad break: no segments were stripped — skip reload entirely.
                 if (!hadStrippedSegments) {
                     console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
@@ -3248,6 +3294,11 @@
         if (lsLowQualityFirst === 'false') {
             LowQualityFirst = false;
             console.log('[AD DEBUG] LowQualityFirst disabled via localStorage — Source types probed before autoplay (360p)');
+        }
+        const lsAlignBackupSequence = localStorage.getItem('twitchAdSolutions_alignBackupSequence');
+        if (lsAlignBackupSequence === 'false') {
+            AlignBackupSequence = false;
+            console.log('[AD DEBUG] AlignBackupSequence disabled via localStorage — backup playlists keep their own media sequence numbers');
         }
         const lsBackupSwapFirst = localStorage.getItem('twitchAdSolutions_backupSwapFirst');
         if (lsBackupSwapFirst === 'false') {

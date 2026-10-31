@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.7.3 (2026-10-31)
+
+### Debug Logging
+- **Switch diag logs media-sequence ranges; playback diag window 12 s → 20 s** — second field run: at an ad start whose backup playlist ended 0.9 s behind the native one, the player appended no new media after the swap. The buffer drained from 3.5 s to 0 over ~5.5 s, then playback stalled (`readyState` 2, 0 frames) past the end of the 12 s window (`frozen 6.50s`). The earlier break with an aligned backup (`+0.0s`) did not stall. To test whether IVS orders segments by sequence number (a backup numbered below the native playlist would look already played), `Switch diag` now prints `seq first..last` and the discontinuity sequence of both playlists, and the sampler runs 20 s. Logging only. vaft only
+
 ## v68.7.2 (2026-10-31)
 
 ### Debug Logging

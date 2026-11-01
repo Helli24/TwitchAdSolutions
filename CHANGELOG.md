@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.8.1 (2026-11-01)
+
+### Debug Logging
+- **Missed-ad diagnostics** — field report: a midroll with countdown played mid-stream in the foreground while the worker was hooked (`Worker intercepted` + `hookWorkerFetch` at page load) and vaft logged nothing for it. Two candidates, both silent until now: an SSAI marker `hasAdTags()` does not know, or a client-side (CSAI) ad whose request fell between the first and tenth logged one. (1) `processM3U8` now logs `Possible missed ad` when a native playlist without a known signifier carries segment titles other than `live` (Twitch titles ad segments after the ad source, e.g. `Amazon|<id>`, `DCM|<id>`), with the titles, all DATERANGE classes and the discontinuity count; rate-limited to once per 30 s per stream. (2) Every CSAI ad request is logged now, not just the first and every tenth, so its timestamp can be matched against an ad that played without `Ad detected`. Logging only. vaft only
+
 ## v68.8.0 (2026-10-31)
 
 ### Fixed

@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 99;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 100;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -179,6 +179,7 @@ twitch-videoad.js text/javascript
             EscapeHatchFired: false,
             LastBreakUsedEscapeHatch: false,// FastAutoplayFirstTry signal — set when a break commits autoplay via PreferLowQualityBackup escape hatch. Reset when a Source-tier type wins.
             BackupSequenceOffset: null,// AlignBackupSequence: media-sequence offset (native - backup) fixed at the backup switch, applied to every backup poll of the break; null = not computed
+            LastUnmatchedAdDiagAt: 0,// Diagnostic: last time a native playlist without known ad signifiers carried non-live segment titles (rate limit)
             FastAutoplayConsecutive: 0,// Count of consecutive fast-autoplay wins — triggers periodic re-probe to catch channel recovery.
             LastPlayerReload: 0,
             ReloadTimestamps: [],
@@ -203,9 +204,9 @@ twitch-videoad.js text/javascript
         const inBreak = playerBufferState.inAdBreak === true;
         const c = csaiRequestCounts[csaiType] || (csaiRequestCounts[csaiType] = { inBreak: 0, noBreak: 0 });
         const n = inBreak ? ++c.inBreak : ++c.noBreak;
-        // First, then every 10th. Both totals and the channel ride on every line so a dump
-        // spanning several channels reads as a ratio without the whole session in hand.
-        if (n !== 1 && n % 10 !== 0) { return; }
+        // Every request is logged (a request arrives once per ad decision, so the volume is low). Both totals
+        // and the channel ride on every line so a dump spanning several channels reads as a ratio, and the
+        // timestamp of an unseen request can be matched against an ad that played without "Ad detected".
         const chan = playerBufferState.channelName ? ' on ' + playerBufferState.channelName : '';
         console.log('[AD DEBUG] CSAI ad request (' + transport + ') — type: ' + csaiType + chan
             + (inBreak ? ' during a detected break' : ' with NO break detected — vaft never saw this ad')
@@ -1114,6 +1115,29 @@ twitch-videoad.js text/javascript
             }
         }
         const haveAdTags = hasAdTags(textStr) || SimulatedAdsDepth > 0;
+        // Missed-ad diagnostic: Twitch titles live segments "live" (#EXTINF:2.000,live) and ad segments
+        // after the ad source ("Amazon|<id>", "DCM|<id>"). A playlist with non-live titles that hasAdTags()
+        // did not flag is an ad vaft cannot see. Log the titles, DATERANGE classes and discontinuities so the
+        // missing marker can be identified. Rate-limited to once per 30s per stream; logging only.
+        if (!haveAdTags && textStr.indexOf('#EXTINF') !== -1 && Date.now() - (streamInfo.LastUnmatchedAdDiagAt || 0) > 30000) {
+            const titles = new Set();
+            let tm;
+            const titleRe = /#EXTINF:[\d.]+,([^\n]*)/g;
+            while ((tm = titleRe.exec(textStr)) !== null) {
+                const title = tm[1].trim();
+                if (title && title !== 'live') titles.add(title);
+            }
+            if (titles.size > 0) {
+                streamInfo.LastUnmatchedAdDiagAt = Date.now();
+                const classes = new Set();
+                const classRe = /EXT-X-DATERANGE:[^\n]*CLASS="([^"]+)"/g;
+                while ((tm = classRe.exec(textStr)) !== null) classes.add(tm[1]);
+                const discontinuities = (textStr.match(/#EXT-X-DISCONTINUITY\n/g) || []).length;
+                console.log('[AD DEBUG] Possible missed ad — non-live segments without a known ad signifier, channel: ' + streamInfo.ChannelName +
+                    ' | titles: ' + [...titles].slice(0, 5).join(', ') + ' | DATERANGE classes: ' + ([...classes].join(', ') || 'none') +
+                    ' | discontinuities: ' + discontinuities);
+            }
+        }
         // Cache the clean main stream m3u8 for all-stripped recovery fallback.
         // Updated during non-ad polls (outside of any ad break), so by the time an ad
         // break starts, streamInfo.LastCleanNativeM3U8 holds a snapshot ~1-2 seconds old

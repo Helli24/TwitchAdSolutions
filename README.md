@@ -110,6 +110,10 @@ The scripts support runtime configuration via `localStorage`. Set values in the 
 - Renumbers the backup playlist's media sequence onto the native playlist's numbering when vaft switches to a backup at an ad break. Without it, a backup numbered lower than the native stream is treated by the player as already played, which freezes the picture for 10-30 seconds at the start of the break.
 - Set to `false` to keep the backup's own numbering.
 
+**`twitchAdSolutions_unhookedPageReload`** (default: `true`, vaft only, this fork)
+- If vaft loaded after Twitch had already started its video worker, ads cannot be blocked on that page. vaft first restarts the player once; if that does not help, it reloads the page once (at most every 10 minutes per tab).
+- Set to `false` to never reload the page automatically (a log line then asks for a manual refresh).
+
 **`twitchAdSolutions_backupSwapFirst`** (default: `true`, vaft only)
 - **Default ad-blocking path** (as of v63.0.0). On ad detect, immediately swap to a backup player-type m3u8 (site → popout → mobile_web → embed, first clean wins). Avoids the MediaSource mixing that the legacy strip+BLANK_MP4+recovery path produces — fewer loading circles and no A/V desync accumulation.
 - Set to `false` to revert to the legacy sticky CSAI strip-first path. Use this if you're on a channel/network where backup fetches are unreliable and stripping native is preferable.
@@ -136,6 +140,7 @@ localStorage.removeItem('twitchAdSolutions_preferLowQualityBackup');
 localStorage.removeItem('twitchAdSolutions_backupSwapFirst');
 localStorage.removeItem('twitchAdSolutions_lowQualityFirst');
 localStorage.removeItem('twitchAdSolutions_alignBackupSequence');
+localStorage.removeItem('twitchAdSolutions_unhookedPageReload');
 ```
 
 ## Known Extension Conflicts

@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 100;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 101;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2114,7 +2114,31 @@ twitch-videoad.js text/javascript
         loggedGiveUp: false,
         loggedNoWorkerRef: false
     };
-    const MaxUnhookedWorkerReloads = 2;// per page load; a second miss after a reload means the reload did not help
+    // Field log (v68.8.1): two player reloads both left the worker unhooked. A player reload only helps when
+    // Twitch constructs the new worker through window.Worker; when Twitch's player code captured the native
+    // Worker constructor before vaft replaced it, every new worker bypasses the hook and only a page reload
+    // (with vaft injected in time) fixes it. So: one player reload, then one page reload per 10 minutes per tab
+    // (sessionStorage guard against reload loops). Opt-out of the page reload: twitchAdSolutions_unhookedPageReload=false.
+    const MaxUnhookedWorkerReloads = 1;// per page load
+    const UnhookedPageReloadKey = 'twitchAdSolutions_unhookedPageReloadAt';
+    const UnhookedPageReloadMinIntervalMs = 10 * 60 * 1000;
+    function tryUnhookedPageReload() {
+        try {
+            if (localStorage.getItem('twitchAdSolutions_unhookedPageReload') === 'false') {
+                return 'disabled via twitchAdSolutions_unhookedPageReload=false';
+            }
+            const lastAt = parseInt(sessionStorage.getItem(UnhookedPageReloadKey)) || 0;
+            if (Date.now() - lastAt < UnhookedPageReloadMinIntervalMs) {
+                return 'already reloaded this tab ' + Math.round((Date.now() - lastAt) / 1000) + 's ago';
+            }
+            sessionStorage.setItem(UnhookedPageReloadKey, String(Date.now()));
+        } catch (err) {
+            return 'storage unavailable (' + err.message + ')';
+        }
+        console.log('[AD DEBUG] Player worker still not hooked after ' + MaxUnhookedWorkerReloads + ' player reload — reloading the page once so vaft can hook the new worker');
+        location.reload();
+        return null;
+    }
     function checkUnhookedPlayerWorker(player) {
         try {
             const worker = player?.core?.worker;
@@ -2142,7 +2166,10 @@ twitch-videoad.js text/javascript
             if (unhookedWorkerState.reloads >= MaxUnhookedWorkerReloads) {
                 if (!unhookedWorkerState.loggedGiveUp) {
                     unhookedWorkerState.loggedGiveUp = true;
-                    console.log('[AD DEBUG] Player worker still not hooked after ' + MaxUnhookedWorkerReloads + ' reloads — ads will not be blocked on this page, refresh the tab (F5)');
+                    const skipped = tryUnhookedPageReload();
+                    if (skipped) {
+                        console.log('[AD DEBUG] Player worker still not hooked after ' + MaxUnhookedWorkerReloads + ' player reload, page reload skipped (' + skipped + ') — ads will not be blocked on this page, refresh the tab (F5)');
+                    }
                 }
                 return;
             }

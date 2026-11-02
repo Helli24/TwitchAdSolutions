@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.9.0 (2026-11-02)
+
+### Fixed
+- **Unhooked worker: fall back to a page reload** — field log: vaft loaded (`vaft v100 loading`) without any `Worker intercepted` line, the unhooked-worker check fired, and both `'worker-recovery'` player reloads left the worker unhooked (`still not hooked after 2 reloads`); a midroll then played. A player reload only helps when Twitch constructs the new worker through `window.Worker`; once Twitch's player code holds the native constructor from before vaft replaced it, every new worker bypasses the hook. Now: one player reload, then `tryUnhookedPageReload()` reloads the page once (guarded by a sessionStorage timestamp: at most once per 10 minutes per tab, so an injection that keeps losing the race cannot loop). Opt-out: `twitchAdSolutions_unhookedPageReload='false'`. vaft only
+
 ## v68.8.1 (2026-11-01)
 
 ### Debug Logging

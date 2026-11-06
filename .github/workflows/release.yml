@@ -2,9 +2,22 @@ name: Create Release
 
 on:
   workflow_dispatch:
+  # Release automatically when a script change reaches master. Versions that already have a tag are
+  # skipped, so only commits that bump vaft's @version produce a release.
+  push:
+    branches:
+      - master
+    paths:
+      - "vaft/**"
+      - "video-swap-new/**"
+      - "strip/**"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   create-release:
@@ -42,35 +55,69 @@ jobs:
         VERSION=$(grep -m1 '@version' vaft/vaft.user.js | sed 's/.*@version\s*//')
         echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+    - name: Check whether this version is already released
+      id: existing
+      run: |
+        if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" > /dev/null; then
+          echo "tag=true" >> $GITHUB_OUTPUT
+          echo "v${{ steps.version.outputs.version }} already tagged"
+        else
+          echo "tag=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: Set up Git user
+      if: steps.existing.outputs.tag == 'false'
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
     - name: Update permalink hashes in README
+      if: steps.existing.outputs.tag == 'false'
       run: |
         CURRENT_HASH=$(git rev-parse HEAD)
         sed -i "s|/Helli24/TwitchAdSolutions/[a-f0-9]\{40\}/|/Helli24/TwitchAdSolutions/${CURRENT_HASH}/|g" README.md
         git add README.md
 
     - name: Create version commit and tag
+      if: steps.existing.outputs.tag == 'false'
       run: |
         git commit -m "v${{ steps.version.outputs.version }}"
         git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-        git push origin master
+        git push origin HEAD:master
         git push origin "v${{ steps.version.outputs.version }}"
 
+    # A manual run for an already tagged version re-attaches the assets to its existing release.
+    - name: Build release assets
+      if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        mkdir -p "$RUNNER_TEMP/dist"
+        cp vaft/vaft.user.js vaft/vaft-ublock-origin.js \
+           vaft/twitch-brave-fix.user.js vaft/twitch-brave-fix-ublock-origin.js \
+           video-swap-new/video-swap-new.user.js video-swap-new/video-swap-new-ublock-origin.js \
+           strip/strip.user.js "$RUNNER_TEMP/dist/"
+        cd "$RUNNER_TEMP/dist"
+        zip -q "TwitchAdSolutions-v${VERSION}.zip" *.js
+        sha256sum *.js *.zip > SHA256SUMS
+        cat SHA256SUMS
+
     - name: Extract release notes
+      if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
       run: |
         # Only the CHANGELOG section of this version, not the whole file
         awk -v head="## v${{ steps.version.outputs.version }} " 'index($0, head) == 1 { found = 1; next } found && /^## / { exit } found' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
         [ -s "$RUNNER_TEMP/release-notes.md" ] || echo "See CHANGELOG.md" > "$RUNNER_TEMP/release-notes.md"
 
     - name: Create Release
+      if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
       uses: softprops/action-gh-release@v2
       with:
         tag_name: "v${{ steps.version.outputs.version }}"
         name: "vaft v${{ steps.version.outputs.version }}"
         body_path: ${{ runner.temp }}/release-notes.md
+        files: |
+          ${{ runner.temp }}/dist/*.js
+          ${{ runner.temp }}/dist/*.zip
+          ${{ runner.temp }}/dist/SHA256SUMS
         draft: false
         prerelease: false

@@ -86,6 +86,10 @@ All read at init, injected into worker blob:
 
 All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `console.log` directly. Some logs are deduped (once per ad break or once per page load) to prevent console spam.
 
+## Releases
+
+`.github/workflows/release.yml` runs on every push to master that touches `vaft/`, `video-swap-new/` or `strip/` (and manually). If vaft's `@version` has no tag yet it rewrites the README permalinks, commits `vX.Y.Z`, tags it and publishes a GitHub release with the scripts, a ZIP and `SHA256SUMS` as assets and only that version's CHANGELOG section as notes. Already tagged versions are skipped (a manual run re-attaches assets). So: bump `@version` and add a `## vX.Y.Z (date)` CHANGELOG section in the same PR. The README install link uses `releases/latest/download/vaft.user.js` (counted by the downloads badge); `@updateURL` stays on raw master.
+
 ## Validation
 
 `npx acorn --ecma2022 file.js` (skip line 1 for uBlock files: `tail -n +2 file.js | npx acorn --ecma2022`). GitHub Actions validates on push/PR.

@@ -2,6 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/Helli24/TwitchAdSolutions/releases"><img alt="Latest version" src="https://img.shields.io/github/v/release/Helli24/TwitchAdSolutions?display_name=tag&label=version"></a>
+  <a href="https://github.com/Helli24/TwitchAdSolutions/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Helli24/TwitchAdSolutions/total?label=downloads"></a>
   <a href="https://github.com/Helli24/TwitchAdSolutions/commits/master"><img alt="Last commit" src="https://img.shields.io/github/last-commit/Helli24/TwitchAdSolutions"></a>
   <a href="https://github.com/Helli24/TwitchAdSolutions/actions/workflows/validate.yml"><img alt="Validate JS" src="https://img.shields.io/github/actions/workflow/status/Helli24/TwitchAdSolutions/validate.yml?branch=master&label=checks"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/Helli24/TwitchAdSolutions"></a>
@@ -29,7 +30,7 @@ Fork of [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolut
 1. Install a userscript manager: [Tampermonkey](https://www.tampermonkey.net/) (recommended) or [Violentmonkey](https://violentmonkey.github.io/). On Safari: [Userscripts](https://apps.apple.com/us/app/userscripts/id1463298887). *Greasemonkey doesn't work with the scripts.*
 2. **Chrome / Edge (Manifest V3):** open `chrome://extensions`, click **Details** on the userscript manager and enable **Allow user scripts**.
 3. **Tampermonkey:** Dashboard → Settings → set *Config mode* to **Expert** → section *Security* → set **Content Script API** to **UserScripts API Dynamic** → Save. Without it Chrome may start the script after Twitch's player, and ads on that page are not blocked (vaft then reloads the player or the page once to recover).
-4. Open the [vaft userscript](https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js) and confirm the installation.
+4. Open the [vaft userscript](https://github.com/Helli24/TwitchAdSolutions/releases/latest/download/vaft.user.js) and confirm the installation. Updates are then fetched automatically from this repository.
 5. Reload Twitch. In the browser console (F12) you should see `[AD DEBUG] TwitchAdSolutions vaft v… loading` and `Worker intercepted — injecting ad-block hooks`.
 
 Remove any older TwitchAdSolutions / vaft userscript first (for example from pixeltris or ryanbr), otherwise both run at the same time.
@@ -44,13 +45,13 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.9.1 | **Your mute is kept.** A mute set with the player button or the `m` key is no longer undone by the player reload after an ad break. |
 | 68.7.x / 68.8.1 | Extra `[AD DEBUG]` diagnostics: switch and playback timing at ad start/end, ads vaft cannot detect, every client-side ad request. |
 
-Details for every version are in the [CHANGELOG](CHANGELOG.md).
+Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
 
 ## Scripts
 
 | Script | Userscript | uBlock Origin | Notes |
 |---|---|---|---|
-| **vaft** | [install](https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js) | [resource](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js) / [permalink](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/3378ec082317e4956e0886f91bbba7326c6e83e3/vaft/vaft-ublock-origin.js) | Recommended. Swaps to an ad-free backup stream during ad breaks; the fork changes above apply to vaft only. |
+| **vaft** | [install](https://github.com/Helli24/TwitchAdSolutions/releases/latest/download/vaft.user.js) | [resource](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/master/vaft/vaft-ublock-origin.js) / [permalink](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/3378ec082317e4956e0886f91bbba7326c6e83e3/vaft/vaft-ublock-origin.js) | Recommended. Swaps to an ad-free backup stream during ad breaks; the fork changes above apply to vaft only. |
 | video-swap-new | [install](https://github.com/Helli24/TwitchAdSolutions/raw/master/video-swap-new/video-swap-new.user.js) | [resource](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/master/video-swap-new/video-swap-new-ublock-origin.js) / [permalink](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/3378ec082317e4956e0886f91bbba7326c6e83e3/video-swap-new/video-swap-new-ublock-origin.js) | Older approach, not recommended. |
 | twitch-brave-fix | [install](https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/twitch-brave-fix.user.js) | [resource](https://raw.githubusercontent.com/Helli24/TwitchAdSolutions/master/vaft/twitch-brave-fix-ublock-origin.js) | Companion for Brave only, if Twitch rejects requests because of Brave's fingerprint protection. |
 

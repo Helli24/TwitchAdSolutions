@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.9.1 (2026-11-06)
+
+### Fixed
+- **A deliberate mute was undone after ad breaks** — field log: `Hard reload backstop unmute fired — element was still muted at 5500ms (initial: already-muted on entry — recovering from silent Twitch re-mute)` right after a post-ad hard reload, while the user had muted the stream themselves. `RecoverFromSilentMute` treats any mute on entry to a hard reload as Twitch's silent re-mute once vaft has unmuted at least once in the session, which is true after the first ad break. New `trackUserMuteIntent()`: a mute or unmute of the player `<video>` within 1.5 s of a click or keypress (Twitch's mute button, the `m` key) is recorded as the user's choice (`playerBufferState.userMuteIntent`), and the recovery is skipped while the user wants it muted. Mutes without user input (Twitch's own) are still recovered. Logs `User muted the player` / `keeping it muted`. vaft only
+
 ## v68.9.0 (2026-11-02)
 
 ### Fixed

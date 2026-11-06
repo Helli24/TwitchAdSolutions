@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/Helli24/TwitchAdSolutions
-// @version      68.9.0
+// @version      68.9.1
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 101;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 102;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2125,7 +2125,9 @@
         loggedPauseIntent: false,
         weJustPaused: 0,
         inAdBreak: false,
-        vaftEverUnmuted: false
+        vaftEverUnmuted: false,
+        userMuteIntent: false,// set when the player <video> is muted within 1.5s of a click/keypress (the user's own mute)
+        lastUserInputAt: 0
     };
     // Poll the player state to detect and fix buffering caused by ad stream switching
     // Switch playback diagnostic. Samples the player's <video> every 250ms for 20s after an ad-start
@@ -2980,7 +2982,13 @@
                     // session-mute users have vaftEverUnmuted=false → backstop never engages
                     // → mute respected. Disabled by twitchAdSolutions_recoverFromSilentMute=
                     // false for users who deliberately mute mid-session.
-                    const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute;
+                    // A mute the user set (tracked by trackUserMuteIntent) is never "recovered": without
+                    // this, a deliberate mid-session mute was undone by the 5500ms backstop on the next
+                    // post-ad hard reload, because vaftEverUnmuted was already true.
+                    const shouldRecover = playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && !playerBufferState.userMuteIntent;
+                    if (v && v.muted && !wasInitiallyUnmuted && playerBufferState.vaftEverUnmuted && RecoverFromSilentMute && playerBufferState.userMuteIntent) {
+                        console.log('[AD DEBUG] Hard reload: player muted by the user — keeping it muted (no silent re-mute recovery)');
+                    }
                     if (v && (wasInitiallyUnmuted || shouldRecover)) {
                         if (wasInitiallyUnmuted) {
                             v.muted = true;
@@ -3384,6 +3392,26 @@
         }
     } catch {}
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
+    // User mute intent: a mute/unmute of the player <video> within 1.5s of a click or keypress (Twitch's mute
+    // button, the "m" key) is the user's choice; mutes without user input are Twitch's own (autoplay policy,
+    // silent re-mute after a reload). Media events do not bubble, so listen in the capture phase on document.
+    function trackUserMuteIntent() {
+        const markInput = () => { playerBufferState.lastUserInputAt = Date.now(); };
+        document.addEventListener('pointerdown', markInput, true);
+        document.addEventListener('keydown', markInput, true);
+        document.addEventListener('volumechange', (e) => {
+            try {
+                const target = e.target;
+                if (!(target instanceof HTMLVideoElement) || target !== getPlayerVideoElement()) return;
+                if (Date.now() - playerBufferState.lastUserInputAt > 1500) return;
+                if (playerBufferState.userMuteIntent !== target.muted) {
+                    playerBufferState.userMuteIntent = target.muted;
+                    console.log('[AD DEBUG] User ' + (target.muted ? 'muted' : 'unmuted') + ' the player — ' + (target.muted ? 'reloads will keep it muted' : 'silent re-mute recovery active again'));
+                }
+            } catch {}
+        }, true);
+    }
+    trackUserMuteIntent();
     hookWindowWorker();
     hookFetch();
     // Hook XHR to detect CSAI ad requests that bypass fetch

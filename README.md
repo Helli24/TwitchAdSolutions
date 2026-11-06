@@ -113,6 +113,7 @@ Advanced settings (vaft):
 - Open the console (F12), type `AD DEBUG` into the filter and reload the page. See [DEBUG.md](DEBUG.md) for what the lines mean.
 - **Ads play although vaft is installed:** check for `Worker intercepted` after `vaft … loading`. If it is missing, see step 3 of [Install](#install).
 - More known issues: [issues.md](issues.md).
+- Still not working? [Open an issue](https://github.com/Helli24/TwitchAdSolutions/issues/new?template=bug_report.yml) with the `[AD DEBUG]` console lines.
 
 ### Known extension conflicts
 

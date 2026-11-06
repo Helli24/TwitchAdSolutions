@@ -60,11 +60,17 @@ jobs:
         git push origin master
         git push origin "v${{ steps.version.outputs.version }}"
 
+    - name: Extract release notes
+      run: |
+        # Only the CHANGELOG section of this version, not the whole file
+        awk -v head="## v${{ steps.version.outputs.version }} " 'index($0, head) == 1 { found = 1; next } found && /^## / { exit } found' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+        [ -s "$RUNNER_TEMP/release-notes.md" ] || echo "See CHANGELOG.md" > "$RUNNER_TEMP/release-notes.md"
+
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: "v${{ steps.version.outputs.version }}"
-        name: "Release v${{ steps.version.outputs.version }}"
-        body_path: CHANGELOG.md
+        name: "vaft v${{ steps.version.outputs.version }}"
+        body_path: ${{ runner.temp }}/release-notes.md
         draft: false
         prerelease: false

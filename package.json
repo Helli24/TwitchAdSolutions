@@ -1,0 +1,12 @@
+{
+  "name": "twitchadsolutions",
+  "private": true,
+  "description": "Development tooling for the TwitchAdSolutions userscripts (tests and syntax checks only; the scripts have no runtime dependencies).",
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/test.js"
+  },
+  "devDependencies": {
+    "acorn": "8.19.0"
+  }
+}

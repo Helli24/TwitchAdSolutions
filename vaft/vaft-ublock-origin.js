@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 102;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 103;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -335,6 +335,8 @@ twitch-videoad.js text/javascript
                     ${notifyAdComplete.toString()}
                     ${stripAdSegments.toString()}
                     ${videoCodecFamily.toString()}
+                    ${getBackupSequenceOffset.toString()}
+                    ${shiftMediaSequence.toString()}
                     ${getStreamUrlForResolution.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
@@ -1035,6 +1037,40 @@ twitch-videoad.js text/javascript
     // unrecognised attribute rather than throwing — a variant without CODECS used to blow up
     // the raw .startsWith() checks below and hang the master-playlist fetch. Ported from
     // testing v674. Serialized into the worker blob — must not reference outer-scope variables.
+    // AlignBackupSequence helpers (worker-serialized; no outer-scope references). The offset maps the
+    // backup playlist's media-sequence numbers onto the native numbering: (native last seq - backup
+    // last seq) minus the PROGRAM-DATE-TIME difference of the newest segments in whole segments,
+    // rounded down so the first new backup segment overlaps the native buffer instead of leaving a gap.
+    // Returns 0 when either playlist lacks a sequence or a PDT.
+    function getBackupSequenceOffset(nativeM3u8, backupM3u8) {
+        const seqInfo = (m3u8) => {
+            const first = parseInt((m3u8.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
+            const count = (m3u8.match(/#EXTINF/g) || []).length;
+            const pdts = m3u8.match(/#EXT-X-PROGRAM-DATE-TIME:[^\n]+/g);
+            const segDur = parseFloat((m3u8.match(/#EXTINF:([\d.]+)/) || [])[1]);
+            return {
+                first: first,
+                last: first + count - 1,
+                newest: pdts ? Date.parse(pdts[pdts.length - 1].substring(25)) : NaN,
+                segDur: segDur > 0 ? segDur : 2
+            };
+        };
+        const nativeInfo = seqInfo(nativeM3u8);
+        const backupInfo = seqInfo(backupM3u8);
+        if (isNaN(nativeInfo.last) || isNaN(backupInfo.last) || isNaN(nativeInfo.newest) || isNaN(backupInfo.newest)) {
+            return { offset: 0, nativeInfo: nativeInfo, backupInfo: backupInfo };
+        }
+        const offset = (nativeInfo.last - backupInfo.last) - Math.floor((nativeInfo.newest - backupInfo.newest) / 1000 / backupInfo.segDur);
+        return { offset: offset, nativeInfo: nativeInfo, backupInfo: backupInfo };
+    }
+    // Shifts #EXT-X-MEDIA-SEQUENCE and Twitch's #EXT-X-TWITCH-LIVE-SEQUENCE by offset (worker-serialized)
+    function shiftMediaSequence(m3u8, offset) {
+        if (!offset) {
+            return m3u8;
+        }
+        return m3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + (parseInt(seq) + offset))
+            .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + (parseInt(seq) + offset));
+    }
     function videoCodecFamily(codecs) {
         if (!codecs) return 'unknown';
         // Scan every comma-separated entry rather than assuming the video codec is listed
@@ -1606,34 +1642,16 @@ twitch-videoad.js text/javascript
                 if (AlignBackupSequence) {
                     try {
                         if (streamInfo.ActiveBackupPlayerType != backupPlayerType || streamInfo.BackupSequenceOffset === null) {
-                            const seqInfo = (m3u8) => {
-                                const first = parseInt((m3u8.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
-                                const count = (m3u8.match(/#EXTINF/g) || []).length;
-                                const pdts = m3u8.match(/#EXT-X-PROGRAM-DATE-TIME:[^\n]+/g);
-                                const segDur = parseFloat((m3u8.match(/#EXTINF:([\d.]+)/) || [])[1]);
-                                return {
-                                    first: first,
-                                    last: first + count - 1,
-                                    newest: pdts ? Date.parse(pdts[pdts.length - 1].substring(25)) : NaN,
-                                    segDur: segDur > 0 ? segDur : 2
-                                };
-                            };
-                            const nativeInfo = seqInfo(textStr);
-                            const backupInfo = seqInfo(backupM3u8);
-                            let offset = 0;
-                            if (!isNaN(nativeInfo.last) && !isNaN(backupInfo.last) && !isNaN(nativeInfo.newest) && !isNaN(backupInfo.newest)) {
-                                offset = (nativeInfo.last - backupInfo.last) - Math.floor((nativeInfo.newest - backupInfo.newest) / 1000 / backupInfo.segDur);
-                            }
+                            const alignment = getBackupSequenceOffset(textStr, backupM3u8);
+                            const offset = alignment.offset;
+                            const nativeInfo = alignment.nativeInfo;
+                            const backupInfo = alignment.backupInfo;
                             streamInfo.BackupSequenceOffset = offset;
                             if (offset !== 0) {
                                 console.log('[AD DEBUG] Aligning backup media sequence by ' + (offset > 0 ? '+' : '') + offset + ' (backup ' + backupInfo.first + '..' + backupInfo.last + ' → ' + (backupInfo.first + offset) + '..' + (backupInfo.last + offset) + ', native ' + nativeInfo.first + '..' + nativeInfo.last + ')');
                             }
                         }
-                        const seqOffset = streamInfo.BackupSequenceOffset;
-                        if (seqOffset) {
-                            backupM3u8 = backupM3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + (parseInt(seq) + seqOffset))
-                                .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + (parseInt(seq) + seqOffset));
-                        }
+                        backupM3u8 = shiftMediaSequence(backupM3u8, streamInfo.BackupSequenceOffset);
                     } catch (err) {
                         console.log('[AD DEBUG] Backup sequence alignment failed: ' + err.message);
                     }

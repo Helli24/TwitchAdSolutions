@@ -6,7 +6,7 @@ All userscript `@namespace` / `@updateURL` / `@downloadURL` headers, README link
 
 ## Worker Blob Serialization (CRITICAL)
 
-Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`.
+Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`, `getBackupSequenceOffset`, `shiftMediaSequence`.
 
 - Declare variables in `declareOptions()` (also serialized) or in the inline blob template literal
 - To pass window-scope values to the worker, inject after `declareOptions(self)`: e.g. `ReloadPlayerAfterAd = ${ReloadPlayerAfterAd};`
@@ -34,7 +34,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.9.1/102, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.9.2/103, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
 
 ## localStorage Config
 
@@ -50,7 +50,7 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_preferLowQualityBackup` — hybrid mode (sticky escape hatch + autoplay last-resort backup), default `true`; set to `false` to disable (vaft only)
 - `twitchAdSolutions_backupSwapFirst` — on ad detect, immediately swap to backup player-type m3u8 (TTV-AB-style) instead of sticky CSAI strip. Default `true` as of v63.0.0; set to `false` for legacy strip-first path (vaft only)
 - `twitchAdSolutions_lowQualityFirst` — fork default `true`. Moves `autoplay` (360p) to position 0 of `playerTypesToTry` on every break (after pin and fast-autoplay reorders, before the contamination reorder) and starts the post-reload minimal-requests window at 0. Set to `'false'` to probe Source types first (vaft only)
-- `twitchAdSolutions_alignBackupSequence` — fork default `true`. At each backup switch, `processM3U8` computes `streamInfo.BackupSequenceOffset` = (native last seq − backup last seq) − floor(PDT difference of the newest segments / segment duration) and shifts `#EXT-X-MEDIA-SEQUENCE` / `#EXT-X-TWITCH-LIVE-SEQUENCE` of every backup poll by it; reset at end of break. Set to `'false'` to disable (vaft only)
+- `twitchAdSolutions_alignBackupSequence` — fork default `true`. At each backup switch, `processM3U8` stores `getBackupSequenceOffset(native, backup).offset` = (native last seq − backup last seq) − floor(PDT difference of the newest segments / segment duration) in `streamInfo.BackupSequenceOffset` and applies `shiftMediaSequence` (MEDIA-SEQUENCE + TWITCH-LIVE-SEQUENCE) to every backup poll; reset at end of break. Set to `'false'` to disable (vaft only)
 - `twitchAdSolutions_fastAutoplayFirstTry` — opt-out (default `true` as of v67.1.0). Prepend autoplay (360p) to position 0 of the iteration when the prior break committed autoplay via PreferLowQualityBackup escape hatch. Saves ~1.5-2s of probe-loop buffering. Auto-resets when a Source-tier type wins (channel recovered) so quality returns to full automatically. Set to `'false'` to force full Source-tier probe on every break (vaft only)
 - `twitchAdSolutions_recoverFromSilentMute` — opt-out (default `true`). On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, recover via the 5500ms backstop (Twitch's silent re-mute pattern — issue #200). Disable via `'false'` if you deliberately mute mid-session and want that preserved across reloads. Users muted from session start are always respected (vaftEverUnmuted=false short-circuits the recovery check). vaft only.
 - `twitchAdSolutions_disableAdSpoofing` — opt-in via `'false'` (default `'true'` — spoofing is OFF). When enabled, on ad detect vaft fires the GQL ad-tracking beacons (`video_ad_impression`, `video_ad_quartile_complete` × 4, `video_ad_pod_complete`) that Twitch's player would have sent if the ad had played normally. Originally intended to mimic the ad-completion signal Twitch expects and may reduce detection escalation — but the always-100%-watched + audible + visible beacon pattern may itself fingerprint as anomalous (silently, without GQL rejection) and trigger detection escalation in the other direction (observed correlation with CSAI ads reaching committed backups + TTV-AB maintainer hypothesis). Default flipped from on→off after v68.2.0. Set to `'false'` to re-enable (for A/B testing whether spoofing affects ad break duration / CSAI escalation on your channels). Failures swallowed (never blocks ad-block flow). vaft only.
@@ -92,7 +92,11 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 
 ## Validation
 
-`npx acorn --ecma2022 file.js` (skip line 1 for uBlock files: `tail -n +2 file.js | npx acorn --ecma2022`). GitHub Actions validates on push/PR.
+`npm ci` once, then:
+- `npm test` — unit tests. `tests/scripts.js` parses `vaft/vaft.user.js` and `vaft/vaft-ublock-origin.js` with acorn, extracts declarations from the IIFE body by name and evaluates them in a `vm` context (worker functions after `declareOptions(globalThis)`, like the blob; main-thread functions with mocked globals). Every suite runs against both formats. Never copy script functions into tests; add the name to the `loadWorker`/`loadMain` call instead. New fork logic should live in a named function so it can be tested this way.
+- `npx acorn --ecma2022 file.js` — syntax check (skip line 1 for uBlock files: `tail -n +2 file.js | npx acorn --ecma2022`).
+
+GitHub Actions (`validate.yml`) runs both on every push/PR touching `.js` or `package*.json`; the release workflow runs them before tagging. `tests/benchmark.js` still uses copied historical implementations and is not part of CI.
 
 ## Testing
 

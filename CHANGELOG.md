@@ -1,5 +1,14 @@
 ## Unreleased
 
+## v68.9.2 (2026-11-08)
+
+### Tests
+- **Unit tests run against the shipped scripts** — `tests/test.js` used hand-copied snapshots of the functions it tested, so it never exercised the real code and had drifted (it still asserted that `twitch-trigger` is not an ad signifier, which upstream changed). New `tests/scripts.js` parses `vaft.user.js` and `vaft-ublock-origin.js` with acorn and evaluates the named declarations in a `vm` context (worker functions after `declareOptions(globalThis)`, like the worker blob). Every suite runs against both formats; a deliberate one-line change in only one file fails only that file's run. 174 checks, including new ones for the fork features: backup sequence alignment with the offsets from the field logs (+11, +14, 0, 0, −968), unhooked-worker recovery (one player reload, then one page reload, the 10-minute guard and the opt-out) and user mute intent.
+- `package.json` with acorn as the only dev dependency; CI and the release workflow use `npm ci`, `npx acorn` and `npm test`.
+
+### Changed
+- `AlignBackupSequence`: the offset computation and the sequence shift moved from inline code in `processM3U8` into the worker-serialized helpers `getBackupSequenceOffset()` and `shiftMediaSequence()` so they can be tested. Same behaviour and log line. vaft only
+
 ## v68.9.1 (2026-11-06)
 
 ### Fixed

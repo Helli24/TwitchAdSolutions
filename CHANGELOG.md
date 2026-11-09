@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.10.1 (2026-11-09)
+
+### Debug Logging
+- **Untracked media playlists** — field log: after the preroll at 21:18 vaft logged nothing for four hours while two midrolls with Twitch's ad UI played in the stream's own `<video>` (fed via `srcObject`, i.e. through the player worker). The player worker was hooked (the unhooked-worker check stayed silent) and neither `Possible missed ad` nor a CSAI request was logged. One path in `processM3U8` is completely silent: a media playlist whose URL is not in `StreamInfosByUrl` is passed through unfiltered, ad segments included. That happens when the player got its variant URLs from a master playlist vaft never parsed. New worker-serialized `noteUntrackedPlaylist()` logs `Untracked media playlist — <host/path> … | ad markers: …` on the first sighting of each such URL (max 5 per worker) and `Untracked media playlist carries ads (NOT BLOCKED)` at most every 30 s while it carries ad markers. Query strings are never logged. Logging only. vaft only
+
 ## v68.10.0 (2026-11-09)
 
 ### Debug Logging

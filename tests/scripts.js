@@ -71,13 +71,13 @@ function loadFormat(format) {
         name: format.name,
         // Worker scope: declareOptions(self) + the given worker-serialized functions
         loadWorker(functionNames) {
-            const context = vm.createContext({ console: { log() {}, warn() {}, error() {} } });
+            const context = vm.createContext({ console: { log() {}, warn() {}, error() {} }, URL });
             vm.runInContext(pick(declarations, ['declareOptions', ...functionNames], format.name) + '\ndeclareOptions(globalThis);', context, { filename: format.file });
             return context;
         },
         // Main-thread scope: the given declarations evaluated with the test's mocks as globals
         loadMain(names, globals) {
-            const context = vm.createContext(Object.assign({ console: { log() {}, warn() {}, error() {} } }, globals));
+            const context = vm.createContext(Object.assign({ console: { log() {}, warn() {}, error() {} }, URL }, globals));
             vm.runInContext(pick(declarations, names, format.name), context, { filename: format.file });
             return context;
         }

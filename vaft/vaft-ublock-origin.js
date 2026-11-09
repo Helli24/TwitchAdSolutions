@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 105;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 106;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2184,11 +2184,12 @@ twitch-videoad.js text/javascript
     // Once per appearance, log a snapshot: matched element and text, every <video>/<iframe> with its source
     // host, whether the player's worker is hooked, and the hosts requested in the last 30s on the main thread
     // (PerformanceObserver ring buffer) and in the hooked worker (RecentWorkerRequests, fetched by message).
-    // Read-only: nothing is hidden, reloaded or blocked. Detection selectors may be broad because they only read.
+    // Read-only: nothing is hidden, reloaded or blocked. Detection selectors may be broad because they only read,
+    // but a match needs visible text: an empty element that stays on screen (field log: "ax-overlay", present
+    // on every page load) would otherwise use up the once-per-appearance log before a real ad shows up.
     const AdWatchdogSelectors = [
         '[data-a-target="video-ad-label"]',
         '[data-a-target="video-ad-countdown"]',
-        '[data-a-target="ax-overlay"]',
         '[data-test-selector="ad-banner-default-id"]',
         '[data-a-target*="video-ad"]',
         '[data-test-selector*="video-ad"]'
@@ -2213,7 +2214,7 @@ twitch-videoad.js text/javascript
                     recentMainRequests.push({ t: Math.round(performance.timeOrigin + entry.startTime), u: u });
                     if (recentMainRequests.length > 100) recentMainRequests.shift();
                 }
-            }).observe({ type: 'resource', buffered: false });
+            }).observe({ type: 'resource', buffered: true });// buffered: include loads since page start
         } catch (err) {
             console.log('[AD DEBUG] Ad watchdog: request log unavailable (' + err.message + ')');
         }
@@ -2239,8 +2240,9 @@ twitch-videoad.js text/javascript
         const describe = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100);
         for (const selector of AdWatchdogSelectors) {
             for (const el of document.querySelectorAll(selector)) {
-                if (el.getClientRects && el.getClientRects().length > 0) {
-                    return { selector: selector, text: describe(el) };
+                const text = describe(el);
+                if (text && el.getClientRects && el.getClientRects().length > 0) {
+                    return { selector: selector, text: text };
                 }
             }
         }

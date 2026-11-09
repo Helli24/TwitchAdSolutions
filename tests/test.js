@@ -379,6 +379,9 @@ function mainTests(format) {
     wd.dom.adUi = [wd.hidden];
     wd.ctx.checkAdWatchdog(wdPlayer);
     assertEq(wd.logs.length, 0, 'hidden ad UI element: nothing logged');
+    wd.dom.adUi = [Object.assign({ textContent: '  ' }, wd.visible)];
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    assertEq(wd.logs.length, 0, 'visible element without text (field: ax-overlay at page load): nothing logged');
     wd.dom.adUi = [Object.assign({ textContent: ' Ad 1 of 2\n 0:15 ' }, wd.visible)];
     wd.dom.videos = [{ currentSrc: 'blob:https://www.twitch.tv/x', clientWidth: 1280, clientHeight: 720, paused: false, muted: false },
         { currentSrc: 'https://m.media-amazon.com/ad.mp4?sig=secret', clientWidth: 1280, clientHeight: 720, paused: false, muted: false }];

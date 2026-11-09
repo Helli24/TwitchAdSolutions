@@ -14,6 +14,9 @@ on:
       - "package-lock.json"
       - ".github/workflows/validate.yml"
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -28,19 +31,8 @@ jobs:
     - name: Install dev dependencies
       run: npm ci
 
-    - name: Validate userscripts
-      run: |
-        for f in vaft/vaft.user.js vaft/vaft_testing.user.js video-swap-new/video-swap-new.user.js strip/strip.user.js; do
-          echo "Validating $f..."
-          npx acorn --ecma2022 "$f" > /dev/null
-        done
-
-    - name: Validate uBlock scripts
-      run: |
-        for f in vaft/vaft-ublock-origin.js vaft/vaft-testing-ublock-origin.js video-swap-new/video-swap-new-ublock-origin.js video-swap-new/video-swap-new-ublock-origin-testing.js; do
-          echo "Validating $f..."
-          tail -n +2 "$f" | npx acorn --ecma2022 > /dev/null
-        done
+    - name: Check syntax of all scripts
+      run: npm run syntax
 
     - name: Run unit tests (loads the functions from vaft.user.js and vaft-ublock-origin.js)
       run: npm test

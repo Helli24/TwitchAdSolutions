@@ -4,6 +4,7 @@
   "description": "Development tooling for the TwitchAdSolutions userscripts (tests and syntax checks only; the scripts have no runtime dependencies).",
   "license": "MIT",
   "scripts": {
+    "syntax": "node tests/syntax.js",
     "test": "node tests/test.js"
   },
   "devDependencies": {

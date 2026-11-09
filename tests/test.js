@@ -5,7 +5,7 @@
 // copied into this file — and every suite runs against both vaft.user.js and vaft-ublock-origin.js,
 // so the two formats cannot drift apart unnoticed.
 
-const { formats } = require('./scripts');
+const { formats, findPairDifferences } = require('./scripts');
 
 let passed = 0;
 let failed = 0;
@@ -195,6 +195,29 @@ function workerTests(format) {
     const unshifted = playlist(5, 2, '2026-11-01T00:00:00Z');
     assertEq(W.shiftMediaSequence(unshifted, 0), unshifted, 'offset 0 leaves the playlist unchanged');
     assert(W.shiftMediaSequence(playlist(1000, 2, '2026-11-01T00:00:00Z'), -968).includes('#EXT-X-MEDIA-SEQUENCE:32'), 'negative offset shifts down');
+    // Preroll (field 21:18: backup 13..26, native 0..2, offset -24): no sequence number below 0
+    const prerollBackup = playlist(13, 14, '2026-11-08T20:18:53.384Z');
+    const trimmed = W.shiftMediaSequence(prerollBackup, -24);
+    assert(trimmed.includes('#EXT-X-MEDIA-SEQUENCE:0\n') && trimmed.includes('#EXT-X-TWITCH-LIVE-SEQUENCE:0\n'), 'a shift below 0 is numbered from 0');
+    assert(!/SEQUENCE:-/.test(trimmed), 'never emits a negative sequence number');
+    assertEq((trimmed.match(/#EXTINF/g) || []).length, 3, 'keeps exactly the segments that line up with native 0..2');
+    assertEq((trimmed.match(/#EXT-X-PROGRAM-DATE-TIME/g) || []).length, 3, 'drops the PROGRAM-DATE-TIME of dropped segments');
+    assert(trimmed.includes('/24.ts') && trimmed.includes('/26.ts') && !trimmed.includes('/23.ts'), 'drops the oldest segments, keeps the newest');
+    assert(trimmed.includes('2026-11-08T20:18:53.384Z'), 'the newest segment keeps its PROGRAM-DATE-TIME');
+    const nextPoll = W.shiftMediaSequence(playlist(15, 14, '2026-11-08T20:18:57.384Z'), -24);
+    assert(nextPoll.includes('#EXT-X-MEDIA-SEQUENCE:0\n') && (nextPoll.match(/#EXTINF/g) || []).length === 5, 'the next poll continues the numbering (0..4)');
+    const allBelow = W.shiftMediaSequence(playlist(13, 3, '2026-11-08T20:18:53.384Z'), -100);
+    assert(allBelow.includes('#EXT-X-MEDIA-SEQUENCE:0\n') && (allBelow.match(/#EXTINF/g) || []).length === 1, 'always keeps at least one segment');
+    const withTags = ['#EXTM3U', '#EXT-X-MEDIA-SEQUENCE:2', '#EXT-X-MAP:URI="init.mp4"', '#EXT-X-DATERANGE:ID="x",CLASS="twitch-session"',
+        '#EXT-X-PROGRAM-DATE-TIME:2026-11-08T20:00:00.000Z', '#EXTINF:2.000,live', 'a.mp4',
+        '#EXT-X-DISCONTINUITY', '#EXT-X-PROGRAM-DATE-TIME:2026-11-08T20:00:02.000Z', '#EXTINF:2.000,live', 'b.mp4',
+        '#EXT-X-DISCONTINUITY', '#EXT-X-PROGRAM-DATE-TIME:2026-11-08T20:00:04.000Z', '#EXTINF:2.000,live', 'c.mp4',
+        '#EXT-X-TWITCH-PREFETCH:https://example.invalid/d.mp4'].join('\n');
+    const trimmedTags = W.shiftMediaSequence(withTags, -4);
+    assert(trimmedTags.includes('#EXT-X-MAP:URI="init.mp4"') && trimmedTags.includes('twitch-session') && trimmedTags.includes('#EXT-X-TWITCH-PREFETCH'), 'header, MAP, DATERANGE and prefetch tags survive the trim');
+    assert(!trimmedTags.includes('a.mp4') && !trimmedTags.includes('b.mp4') && trimmedTags.includes('c.mp4'), 'drops whole segments');
+    assert(trimmedTags.includes('#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n'), 'a dropped discontinuity is counted into DISCONTINUITY-SEQUENCE');
+    assertEq((trimmedTags.match(/#EXT-X-DISCONTINUITY\n/g) || []).length, 1, 'the discontinuity before the first kept segment stays');
 
     // Fork: ad watchdog (68.10.0)
     section('describeRequestUrl');
@@ -213,6 +236,9 @@ function workerTests(format) {
     const adList = cleanList.replace('#EXTINF', '#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad"\n#EXTINF');
     const t0 = 1000000;
     assertEq(W.noteUntrackedPlaylist('https://v.example/a.m3u8', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nx.m3u8', t0), null, 'master playlists are ignored');
+    assertEq(W.noteUntrackedPlaylist('https://v.example/vod.m3u8', '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:10.000,\n0.ts', t0), null, 'VOD playlists are ignored');
+    assertEq(W.noteUntrackedPlaylist('https://v.example/ended.m3u8', cleanList + '\n#EXT-X-ENDLIST', t0), null, 'ended playlists are ignored');
+    assertEq(Object.keys(W.UntrackedPlaylists).length, 0, 'ignored playlists do not use up the URL cap');
     const first = W.noteUntrackedPlaylist('https://v.example/a.m3u8?token=secret', cleanList, t0);
     assert(first && first.includes('Untracked media playlist — v.example/a.m3u8') && first.includes('ad markers: none'), 'first sighting of an untracked media playlist is logged');
     assert(!first.includes('secret'), 'no query string in the log');
@@ -304,7 +330,7 @@ function mainTests(format) {
     t.tickAfterWait();
     assertEq(t.calls.playerTask.length, 0, 'paused video: no recovery');
 
-    // Fork: user mute intent (68.9.1)
+    // Fork: user mute intent (68.9.1, input filter 68.10.3)
     section('trackUserMuteIntent');
     class HTMLVideoElement {}
     const playerVideo = new HTMLVideoElement();
@@ -312,29 +338,57 @@ function mainTests(format) {
     const handlers = {};
     const muteCtx = format.loadMain(['trackUserMuteIntent'], {
         HTMLVideoElement,
-        playerBufferState: { userMuteIntent: false, lastUserInputAt: 0 },
+        playerBufferState: { userMuteIntent: false, lastUserInputAt: 0, lastOwnMuteAt: 0 },
         getPlayerVideoElement: () => playerVideo,
         document: { addEventListener: (type, fn) => { handlers[type] = fn; } }
     });
     muteCtx.trackUserMuteIntent();
     const state = muteCtx.playerBufferState;
+    const inPlayerEl = { tagName: 'BUTTON', closest: (sel) => sel.includes('.video-player') ? {} : null };
+    const outsideEl = { tagName: 'DIV', closest: () => null };
+    const chatInput = { tagName: 'DIV', isContentEditable: true, closest: () => null };
+    const forgetInput = () => { state.lastUserInputAt = Date.now() - 5000; };
     playerVideo.muted = true;
     handlers.volumechange({ target: playerVideo });
     assertEq(state.userMuteIntent, false, 'mute without user input is not the user\'s');
-    handlers.pointerdown();
+    handlers.pointerdown({ target: outsideEl });
     handlers.volumechange({ target: playerVideo });
-    assertEq(state.userMuteIntent, true, 'mute right after a click is the user\'s');
+    assertEq(state.userMuteIntent, false, 'a click outside the player does not make a mute the user\'s');
+    handlers.keydown({ target: chatInput });
+    handlers.keydown({ target: { tagName: 'INPUT' } });
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, false, 'typing in chat or a text field does not make a mute the user\'s');
+    handlers.pointerdown({ target: inPlayerEl });
+    state.lastOwnMuteAt = Date.now();
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, false, 'vaft\'s own pre-mute on a hard reload is not the user\'s');
+    state.lastOwnMuteAt = 0;
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, true, 'mute right after a click on the player is the user\'s');
     otherVideo.muted = false;
-    handlers.keydown();
+    handlers.keydown({ target: { tagName: 'BODY' } });
     handlers.volumechange({ target: otherVideo });
     assertEq(state.userMuteIntent, true, 'other <video> elements (ads) are ignored');
-    state.lastUserInputAt = Date.now() - 5000;
+    forgetInput();
     playerVideo.muted = false;
     handlers.volumechange({ target: playerVideo });
-    assertEq(state.userMuteIntent, true, 'unmute without recent input keeps the user mute');
-    handlers.keydown();
+    assertEq(state.userMuteIntent, true, 'unmute without recent input keeps the user mute (Twitch restoring volume on a new element)');
+    handlers.keydown({ target: { tagName: 'BODY' } });
     handlers.volumechange({ target: playerVideo });
-    assertEq(state.userMuteIntent, false, 'unmute right after a keypress clears it');
+    assertEq(state.userMuteIntent, false, 'unmute right after a keypress outside a text field clears it');
+    forgetInput();
+    playerVideo.muted = true;
+    handlers.pointermove({ target: inPlayerEl, buttons: 0 });
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, false, 'moving the pointer over the player is not input');
+    handlers.pointermove({ target: inPlayerEl, buttons: 1 });
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, true, 'dragging the volume slider to 0 is the user\'s mute');
+    forgetInput();
+    playerVideo.muted = false;
+    handlers.wheel({ target: inPlayerEl });
+    handlers.volumechange({ target: playerVideo });
+    assertEq(state.userMuteIntent, false, 'wheel over the player counts as input');
 
     // Fork: ad watchdog (68.10.0)
     section('checkAdWatchdog');
@@ -362,7 +416,7 @@ function mainTests(format) {
                 NodeFilter: { SHOW_TEXT: 4 },
                 playerBufferState: { inAdBreak: false },
                 getPlayerVideoElement: () => dom.videos[0] || null,
-                postTwitchWorkerMessage: (key) => posted.push(key),
+                postTwitchWorkerMessage: (key) => posted.push('all:' + key),
                 PerformanceObserver: class { observe() {} },
                 performance: { timeOrigin: 0 },
                 setTimeout: () => 1,
@@ -371,7 +425,7 @@ function mainTests(format) {
         return { ctx, logs, posted, dom, visible, hidden };
     };
     let wd = makeWatchdog();
-    const playerWorker = { postMessage() {} };
+    const playerWorker = { postMessage: (msg) => wd.posted.push('player:' + msg.key) };
     const wdPlayer = { core: { worker: playerWorker } };
     wd.ctx.hookedTwitchWorkers.add(playerWorker);
     wd.ctx.checkAdWatchdog(wdPlayer);
@@ -387,6 +441,7 @@ function mainTests(format) {
         { currentSrc: 'https://m.media-amazon.com/ad.mp4?sig=secret', clientWidth: 1280, clientHeight: 720, paused: false, muted: false }];
     // Buffer order is completion order: an old long request can follow a newer one
     wd.ctx.recentMainRequests.push({ t: Date.now() - 5000, u: 'edge.ads.twitch.tv/ads' }, { t: Date.now() - 120000, u: 'old.example/x' });
+    for (let i = 0; i < 40; i++) wd.ctx.recentMainRequests.push({ t: Date.now() - 1000, u: 'static-cdn.example/emoticons/' + i + '.png' });
     wd.ctx.checkAdWatchdog(wdPlayer);
     const wdLog = wd.logs.join('\n');
     assert(wdLog.includes('Twitch ad UI visible, vaft saw NO ad break'), 'visible ad UI without a break is reported');
@@ -394,13 +449,14 @@ function mainTests(format) {
     assert(wdLog.includes('player worker hooked'), 'reports the worker hook state');
     assert(wdLog.includes('PLAYER blob 1280x720 playing') && wdLog.includes('m.media-amazon.com/ad.mp4'), 'lists the player video and the ad video host');
     assert(!wdLog.includes('secret'), 'never logs query strings');
-    assert(wdLog.includes('edge.ads.twitch.tv/ads') && !wdLog.includes('old.example'), 'lists only requests from the last 30s');
-    assertDeepEq(wd.posted, ['GetRecentRequests'], 'asks the hooked worker for its requests');
+    assert(wdLog.includes('edge.ads.twitch.tv ×1: /ads') && !wdLog.includes('old.example'), 'lists only requests from the last 30s');
+    assert(wdLog.includes('static-cdn.example ×40: /emoticons/39.png , /emoticons/38.png (+38 more paths)'), 'groups requests by host, newest paths first, so a busy host cannot push others out');
+    assertDeepEq(wd.posted, ['player:GetRecentRequests'], 'asks the player\'s own hooked worker for its requests');
     const linesAfterFirst = wd.logs.length;
     wd.ctx.checkAdWatchdog(wdPlayer);
     assertEq(wd.logs.length, linesAfterFirst, 'logs only once per ad UI appearance');
     wd.ctx.logAdWatchdogWorkerRequests([{ t: Date.now() - 1000, u: 'video-weaver.example/v1/playlist/abc.m3u8' }]);
-    assert(wd.logs[wd.logs.length - 1].includes('worker requests (last 30s): video-weaver.example/v1/playlist/abc.m3u8'), 'logs the worker requests reply');
+    assert(wd.logs[wd.logs.length - 1].includes('worker requests (last 30s): video-weaver.example ×1: /v1/playlist/abc.m3u8'), 'logs the worker requests reply');
     wd.ctx.logAdWatchdogWorkerRequests([{ t: Date.now(), u: 'late.example/x' }]);
     assert(!wd.logs.join('\n').includes('late.example'), 'ignores worker replies nobody asked for');
     wd.dom.adUi = [];
@@ -412,6 +468,14 @@ function mainTests(format) {
     const rearmLog = wd.logs.slice(linesAfterFirst + 1).join('\n');
     assert(rearmLog.includes('vaft IS blocking an ad break'), 're-arms after the UI was gone 10s and reports a blocked break');
     assert(rearmLog.includes('player worker NOT hooked'), 'reports an unhooked player worker');
+    assertDeepEq(wd.posted, ['player:GetRecentRequests', 'all:GetRecentRequests'], 'falls back to the tracked workers when the player worker is not hooked');
+    const manyHosts = [];
+    for (let i = 0; i < 25; i++) manyHosts.push({ t: 1000, u: 'h' + i + '.example/x' });
+    const hostSummary = wd.ctx.summarizeRecentRequests(manyHosts, 1000, 30000, 20);
+    assertEq(hostSummary.length, 21, 'caps the number of hosts');
+    assertEq(hostSummary[0], 'h24.example ×1: /x', 'most recent host first');
+    assertEq(hostSummary[20], '+5 more hosts', 'says how many hosts were left out');
+    assertDeepEq(Array.from(wd.ctx.summarizeRecentRequests([null, { t: 1000 }, { t: 1000, u: 'bare-host.example' }], 1000, 30000, 20)), ['bare-host.example ×1: /'], 'tolerates malformed entries from the worker');
 
     // Text fallback (attributes renamed) + video fed through srcObject (MSE in the worker)
     wd = makeWatchdog();
@@ -443,6 +507,12 @@ for (const format of formats) {
     workerTests(format);
     mainTests(format);
 }
+
+// Both formats must carry the same code (CLAUDE.md: synced pair)
+currentFormat = 'pair';
+section('vaft.user.js and vaft-ublock-origin.js in sync');
+const pairDifferences = findPairDifferences();
+assertDeepEq(pairDifferences, [], 'no code differences between the two formats');
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);

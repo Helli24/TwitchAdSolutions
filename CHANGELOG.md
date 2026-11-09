@@ -1,5 +1,23 @@
 ## Unreleased
 
+## v68.10.3 (2026-11-09)
+
+Result of a review of all fork changes (68.6.0-68.10.2).
+
+### Fixed
+- **Backup playlists numbered below 0 at prerolls** — at a preroll the native playlist is numbered from 0 with 3 segments while the backup carries 14, so `AlignBackupSequence` shifted the backup onto negative numbers (field logs: `backup 957..970 → -11..2`, `backup 13..26 → -11..2`). `#EXT-X-MEDIA-SEQUENCE` is a non-negative integer in HLS; what a player does with `-11` is undefined. `shiftMediaSequence()` now drops the oldest segments that would land below 0 (with their `PROGRAM-DATE-TIME`), which leaves exactly the segments that line up with native (`0..2`), keeps at least one segment and counts a dropped `#EXT-X-DISCONTINUITY` into `#EXT-X-DISCONTINUITY-SEQUENCE`. The log line says how many segments were dropped. vaft only
+- **A Twitch re-mute could be taken for the user's mute** — `trackUserMuteIntent()` treated a mute within 1.5 s of any click or keypress as the user's, including typing in chat and vaft's own pre-mute at the start of a hard reload. Either marks the player as "muted by the user" and switches off the silent re-mute recovery, so the stream could stay muted after an ad break. Only input aimed at the player counts now (click, drag or wheel on the player, keys pressed outside text fields), vaft's own pre-mute is ignored, and dragging the volume slider is tracked for the whole drag. vaft only
+
+### Changed
+- **Ad watchdog output** — requests are grouped by host (`host ×count: /path , /path (+N more paths)`, most recent host first) instead of listing 25 single URLs, so a busy chat (emote images) or a run of video segments cannot push the interesting hosts out; the main-thread buffer holds 300 entries instead of 100. The worker request list is now asked from the player's own worker (`player.core.worker`) when it is hooked; before, the request went to the most recently constructed worker, which is not necessarily the player's. vaft only
+- `noteUntrackedPlaylist()` ignores VOD and ended playlists, which are never tracked and would only use up the 5-URL log budget. vaft only
+- Comments that the fork's helper functions had separated from their functions are back in place. No code change.
+
+### Tests and CI
+- **The two vaft files are compared in CI** — `tests/scripts.js` tokenizes `vaft.user.js` and `vaft-ublock-origin.js` and fails `npm test` on any code difference beyond the known upstream ones (host check line, comments, two log strings). Until now the pair was only compared by hand. 303 checks.
+- New `npm run syntax` (`tests/syntax.js`) parses all ten shipped scripts, including the two `twitch-brave-fix` files that are release assets but were never syntax-checked; both workflows use it instead of two copied shell loops.
+- Release workflow: the version commit and the tag are pushed atomically (a failed tag push for v68.10.0 had left a version commit without a tag); the release is published with GitHub's own `gh` CLI instead of a third-party action holding the write token; the version string is validated and passed to the shell through the environment. `validate.yml` runs with a read-only token.
+
 ## v68.10.2 (2026-11-09)
 
 ### Fixed

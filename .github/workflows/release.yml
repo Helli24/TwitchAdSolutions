@@ -12,7 +12,6 @@ on:
       - "video-swap-new/**"
       - "strip/**"
 
-
 concurrency:
   group: release
   cancel-in-progress: false
@@ -38,19 +37,8 @@ jobs:
     - name: Install dev dependencies
       run: npm ci
 
-    - name: Validate userscripts
-      run: |
-        for f in vaft/vaft.user.js vaft/vaft_testing.user.js video-swap-new/video-swap-new.user.js strip/strip.user.js; do
-          echo "Validating $f..."
-          npx acorn --ecma2022 "$f" > /dev/null
-        done
-
-    - name: Validate uBlock scripts
-      run: |
-        for f in vaft/vaft-ublock-origin.js vaft/vaft-testing-ublock-origin.js video-swap-new/video-swap-new-ublock-origin.js video-swap-new/video-swap-new-ublock-origin-testing.js; do
-          echo "Validating $f..."
-          tail -n +2 "$f" | npx acorn --ecma2022 > /dev/null
-        done
+    - name: Check syntax of all scripts
+      run: npm run syntax
 
     - name: Run unit tests
       run: npm test
@@ -59,16 +47,23 @@ jobs:
       id: version
       run: |
         VERSION=$(grep -m1 '@version' vaft/vaft.user.js | sed 's/.*@version\s*//')
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        # The version ends up in tag names and shell commands: digits and dots only
+        if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+          echo "Unexpected @version: '$VERSION'" >&2
+          exit 1
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
     - name: Check whether this version is already released
       id: existing
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" > /dev/null; then
-          echo "tag=true" >> $GITHUB_OUTPUT
-          echo "v${{ steps.version.outputs.version }} already tagged"
+        if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+          echo "tag=true" >> "$GITHUB_OUTPUT"
+          echo "v$VERSION already tagged"
         else
-          echo "tag=false" >> $GITHUB_OUTPUT
+          echo "tag=false" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Set up Git user
@@ -84,19 +79,24 @@ jobs:
         sed -i "s|/Helli24/TwitchAdSolutions/[a-f0-9]\{40\}/|/Helli24/TwitchAdSolutions/${CURRENT_HASH}/|g" README.md
         git add README.md
 
+    # Commit and tag go up in one atomic push: either both arrive or neither. With two separate pushes a
+    # failed tag push (GitHub answered 500 for v68.10.0) left the version commit on master without a tag,
+    # and the re-run added a second version commit.
     - name: Create version commit and tag
       if: steps.existing.outputs.tag == 'false'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        git commit -m "v${{ steps.version.outputs.version }}"
-        git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-        git push origin HEAD:master
-        git push origin "v${{ steps.version.outputs.version }}"
+        git diff --cached --quiet || git commit -m "v$VERSION"
+        git tag -a "v$VERSION" -m "Release v$VERSION"
+        git push --atomic origin HEAD:master "refs/tags/v$VERSION"
 
     # A manual run for an already tagged version re-attaches the assets to its existing release.
     - name: Build release assets
       if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
-        VERSION="${{ steps.version.outputs.version }}"
         mkdir -p "$RUNNER_TEMP/dist"
         cp vaft/vaft.user.js vaft/vaft-ublock-origin.js \
            vaft/twitch-brave-fix.user.js vaft/twitch-brave-fix-ublock-origin.js \
@@ -109,21 +109,24 @@ jobs:
 
     - name: Extract release notes
       if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       run: |
         # Only the CHANGELOG section of this version, not the whole file
-        awk -v head="## v${{ steps.version.outputs.version }} " 'index($0, head) == 1 { found = 1; next } found && /^## / { exit } found' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+        awk -v head="## v$VERSION " 'index($0, head) == 1 { found = 1; next } found && /^## / { exit } found' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
         [ -s "$RUNNER_TEMP/release-notes.md" ] || echo "See CHANGELOG.md" > "$RUNNER_TEMP/release-notes.md"
 
-    - name: Create Release
+    # GitHub's own CLI (preinstalled on the runner) instead of a third-party action holding the write token
+    - name: Publish release
       if: steps.existing.outputs.tag == 'false' || github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: "v${{ steps.version.outputs.version }}"
-        name: "vaft v${{ steps.version.outputs.version }}"
-        body_path: ${{ runner.temp }}/release-notes.md
-        files: |
-          ${{ runner.temp }}/dist/*.js
-          ${{ runner.temp }}/dist/*.zip
-          ${{ runner.temp }}/dist/SHA256SUMS
-        draft: false
-        prerelease: false
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        cd "$RUNNER_TEMP/dist"
+        if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          gh release upload "v$VERSION" *.js *.zip SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "v$VERSION" --title "vaft v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" --repo "$GITHUB_REPOSITORY"
+        else
+          gh release create "v$VERSION" *.js *.zip SHA256SUMS --verify-tag --title "vaft v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" --repo "$GITHUB_REPOSITORY"
+        fi

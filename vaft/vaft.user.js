@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/Helli24/TwitchAdSolutions
-// @version      68.10.2
+// @version      68.10.3
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 106;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 107;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1126,11 +1126,6 @@
         }
         return lines.join('\n');
     }
-    // Find the closest matching stream URL for a given resolution from a master m3u8
-    // Video codec family from an m3u8 CODECS attribute. Returns 'unknown' for a missing or
-    // unrecognised attribute rather than throwing — a variant without CODECS used to blow up
-    // the raw .startsWith() checks below and hang the master-playlist fetch. Ported from
-    // testing v674. Serialized into the worker blob — must not reference outer-scope variables.
     // AlignBackupSequence helpers (worker-serialized; no outer-scope references). The offset maps the
     // backup playlist's media-sequence numbers onto the native numbering: (native last seq - backup
     // last seq) minus the PROGRAM-DATE-TIME difference of the newest segments in whole segments,
@@ -1157,25 +1152,67 @@
         const offset = (nativeInfo.last - backupInfo.last) - Math.floor((nativeInfo.newest - backupInfo.newest) / 1000 / backupInfo.segDur);
         return { offset: offset, nativeInfo: nativeInfo, backupInfo: backupInfo };
     }
-    // Shifts #EXT-X-MEDIA-SEQUENCE and Twitch's #EXT-X-TWITCH-LIVE-SEQUENCE by offset (worker-serialized)
+    // Shifts #EXT-X-MEDIA-SEQUENCE and Twitch's #EXT-X-TWITCH-LIVE-SEQUENCE by offset (worker-serialized).
+    // Sequence numbers must not go below 0 (HLS: decimal-integer). At a preroll the native playlist is
+    // numbered from 0 with 3 segments while the backup carries 14 (field: backup 13..26 vs native 0..2,
+    // offset -24), so a plain shift numbered the backup -11..2. The oldest segments that would land
+    // below 0 are dropped instead, which leaves exactly the segments that line up with native (0..2).
+    // At least one segment is always kept; a dropped #EXT-X-DISCONTINUITY is counted into
+    // #EXT-X-DISCONTINUITY-SEQUENCE as the spec requires.
     function shiftMediaSequence(m3u8, offset) {
         if (!offset) {
             return m3u8;
         }
-        return m3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + (parseInt(seq) + offset))
-            .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + (parseInt(seq) + offset));
+        const first = parseInt((m3u8.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
+        let drop = 0;
+        if (!isNaN(first) && first + offset < 0) {
+            const segCount = (m3u8.match(/#EXTINF/g) || []).length;
+            drop = Math.min(-(first + offset), Math.max(segCount - 1, 0));
+        }
+        let droppedDiscontinuities = 0;
+        if (drop > 0) {
+            let remaining = drop;
+            const kept = [];
+            for (const line of m3u8.split('\n')) {
+                if (remaining > 0) {
+                    const tag = line.trim();
+                    if (tag.startsWith('#EXTINF') || tag.startsWith('#EXT-X-PROGRAM-DATE-TIME') || tag.startsWith('#EXT-X-BYTERANGE')) {
+                        continue;
+                    }
+                    if (tag === '#EXT-X-DISCONTINUITY') {
+                        droppedDiscontinuities++;
+                        continue;
+                    }
+                    if (tag && !tag.startsWith('#')) {
+                        remaining--;
+                        continue;
+                    }
+                }
+                kept.push(line);
+            }
+            m3u8 = kept.join('\n');
+        }
+        const renumber = (seq) => Math.max(parseInt(seq) + offset + drop, 0);
+        m3u8 = m3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + renumber(seq))
+            .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + renumber(seq));
+        if (droppedDiscontinuities > 0) {
+            if (/#EXT-X-DISCONTINUITY-SEQUENCE:\d+/.test(m3u8)) {
+                m3u8 = m3u8.replace(/#EXT-X-DISCONTINUITY-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-DISCONTINUITY-SEQUENCE:' + (parseInt(seq) + droppedDiscontinuities));
+            } else {
+                m3u8 = m3u8.replace(/(#EXT-X-MEDIA-SEQUENCE:\d+)/, '$1\n#EXT-X-DISCONTINUITY-SEQUENCE:' + droppedDiscontinuities);
+            }
+        }
+        return m3u8;
     }
-    // Ad watchdog: host + path of a request URL, without query/fragment (tokens live there), path cut to
-    // 60 chars (segment paths are long opaque tokens). null for anything that is not an absolute URL.
-    // Worker-serialized; also used on the main thread.
-    // Diagnostic for the one silent path in processM3U8: a media playlist whose URL is not in
+    // Diagnostic for the one silent path in processM3U8: a live media playlist whose URL is not in
     // StreamInfosByUrl passes through untouched, ad segments included. That happens when the player
     // got its variant URLs from a master playlist vaft never parsed (usher URL not matched, or the
     // master fetched outside the hooked worker). Returns a log line or null: the first sighting of
     // each URL (max 5 URLs per worker), then at most every 30s per URL while it carries ad markers.
-    // Worker-serialized.
+    // VOD playlists (never tracked, no stitched ads) are ignored. Worker-serialized.
     function noteUntrackedPlaylist(url, textStr, now) {
         if (!textStr || !textStr.includes('#EXTINF')) return null;
+        if (textStr.includes('#EXT-X-ENDLIST') || textStr.includes('#EXT-X-PLAYLIST-TYPE:VOD')) return null;
         const described = describeRequestUrl(url) || 'unparsable URL';
         const signifiers = AdSignifiers.filter((s) => s && textStr.includes(s));
         let entry = UntrackedPlaylists[described];
@@ -1194,6 +1231,9 @@
         entry.lastAdLogAt = now;
         return '[AD DEBUG] Untracked media playlist carries ads (NOT BLOCKED) — ' + described + ' | ad markers: ' + signifiers.join(', ');
     }
+    // Ad watchdog: host + path of a request URL, without query/fragment (tokens live there), path cut to
+    // 60 chars (segment paths are long opaque tokens). null for anything that is not an absolute URL.
+    // Worker-serialized; also used on the main thread.
     function describeRequestUrl(url) {
         try {
             const parsed = new URL(url);
@@ -1204,6 +1244,11 @@
             return null;
         }
     }
+    // Find the closest matching stream URL for a given resolution from a master m3u8
+    // Video codec family from an m3u8 CODECS attribute. Returns 'unknown' for a missing or
+    // unrecognised attribute rather than throwing — a variant without CODECS used to blow up
+    // the raw .startsWith() checks below and hang the master-playlist fetch. Ported from
+    // testing v674. Serialized into the worker blob — must not reference outer-scope variables.
     function videoCodecFamily(codecs) {
         if (!codecs) return 'unknown';
         // Scan every comma-separated entry rather than assuming the video codec is listed
@@ -1813,7 +1858,8 @@
                             const backupInfo = alignment.backupInfo;
                             streamInfo.BackupSequenceOffset = offset;
                             if (offset !== 0) {
-                                console.log('[AD DEBUG] Aligning backup media sequence by ' + (offset > 0 ? '+' : '') + offset + ' (backup ' + backupInfo.first + '..' + backupInfo.last + ' → ' + (backupInfo.first + offset) + '..' + (backupInfo.last + offset) + ', native ' + nativeInfo.first + '..' + nativeInfo.last + ')');
+                                const below = Math.max(-(backupInfo.first + offset), 0);// segments that would be numbered below 0 are dropped by shiftMediaSequence
+                                console.log('[AD DEBUG] Aligning backup media sequence by ' + (offset > 0 ? '+' : '') + offset + ' (backup ' + backupInfo.first + '..' + backupInfo.last + ' → ' + Math.max(backupInfo.first + offset, 0) + '..' + Math.max(backupInfo.last + offset, 0) + ', native ' + nativeInfo.first + '..' + nativeInfo.last + ')' + (below > 0 ? ' — dropping the ' + below + ' oldest backup segments so no sequence number is below 0' : ''));
                             }
                         }
                         backupM3u8 = shiftMediaSequence(backupM3u8, streamInfo.BackupSequenceOffset);
@@ -2202,8 +2248,9 @@
         weJustPaused: 0,
         inAdBreak: false,
         vaftEverUnmuted: false,
-        userMuteIntent: false,// set when the player <video> is muted within 1.5s of a click/keypress (the user's own mute)
-        lastUserInputAt: 0
+        userMuteIntent: false,// set when the player <video> is muted within 1.5s of input aimed at the player (the user's own mute)
+        lastUserInputAt: 0,
+        lastOwnMuteAt: 0// vaft's own pre-mute on a hard reload, so trackUserMuteIntent does not take it for the user's
     };
     // Poll the player state to detect and fix buffering caused by ad stream switching
     // Switch playback diagnostic. Samples the player's <video> every 250ms for 20s after an ad-start
@@ -2318,7 +2365,7 @@
         workerTimer: null,
         observerStarted: false
     };
-    const recentMainRequests = [];// { t, u } — last 100 main-thread resource loads
+    const recentMainRequests = [];// { t, u } — last 300 main-thread resource loads
     function startAdWatchdogRequestLog() {
         if (adWatchdogState.observerStarted) return;
         adWatchdogState.observerStarted = true;
@@ -2328,24 +2375,37 @@
                     const u = describeRequestUrl(entry.name);
                     if (!u) continue;
                     recentMainRequests.push({ t: Math.round(performance.timeOrigin + entry.startTime), u: u });
-                    if (recentMainRequests.length > 100) recentMainRequests.shift();
+                    if (recentMainRequests.length > 300) recentMainRequests.shift();
                 }
             }).observe({ type: 'resource', buffered: true });// buffered: include loads since page start
         } catch (err) {
             console.log('[AD DEBUG] Ad watchdog: request log unavailable (' + err.message + ')');
         }
     }
-    // Unique request descriptions from the last windowMs, newest last, at most max entries. Entries are
-    // appended when a request completes, so a long request can sit after newer ones: skip, don't stop.
-    function summarizeRecentRequests(entries, now, windowMs, max) {
-        const seen = new Set();
-        const result = [];
-        for (let i = entries.length - 1; i >= 0 && result.length < max; i--) {
+    // Requests of the last windowMs grouped by host, most recent host first: "host ×count: /path , /path".
+    // Up to 2 sample paths per host (newest first) and the number of further distinct paths, so a busy
+    // chat (emote images) or a run of video segments takes one entry instead of pushing everything else
+    // out. Entries are appended when a request completes, so the buffer is not strictly time-ordered.
+    function summarizeRecentRequests(entries, now, windowMs, maxHosts) {
+        const hosts = new Map();
+        for (let i = entries.length - 1; i >= 0; i--) {
             const entry = entries[i];
-            if (now - entry.t > windowMs) continue;
-            if (seen.has(entry.u)) continue;
-            seen.add(entry.u);
-            result.unshift(entry.u);
+            if (!entry || typeof entry.u !== 'string' || now - entry.t > windowMs) continue;
+            const slash = entry.u.indexOf('/');
+            const host = slash === -1 ? entry.u : entry.u.slice(0, slash);
+            let group = hosts.get(host);
+            if (!group) hosts.set(host, group = { count: 0, paths: new Set() });
+            group.count++;
+            group.paths.add(slash === -1 ? '/' : entry.u.slice(slash));
+        }
+        const result = [];
+        for (const [host, group] of hosts) {
+            if (result.length >= maxHosts) {
+                result.push('+' + (hosts.size - maxHosts) + ' more hosts');
+                break;
+            }
+            const paths = [...group.paths];
+            result.push(host + ' ×' + group.count + ': ' + paths.slice(0, 2).join(' , ') + (paths.length > 2 ? ' (+' + (paths.length - 2) + ' more paths)' : ''));
         }
         return result;
     }
@@ -2409,7 +2469,7 @@
             const vaftState = playerBufferState.inAdBreak ? 'vaft IS blocking an ad break (ad UI shown anyway)' : 'vaft saw NO ad break';
             console.log('[AD DEBUG] Ad watchdog — Twitch ad UI visible, ' + vaftState + ' | element ' + ui.selector + ' "' + ui.text + '" | player worker ' + hooked);
             console.log('[AD DEBUG] Ad watchdog — videos: ' + (media.videos.join(' ; ') || 'none') + ' | iframes: ' + (media.iframes.join(' ; ') || 'none'));
-            console.log('[AD DEBUG] Ad watchdog — main-thread requests (last 30s): ' + (summarizeRecentRequests(recentMainRequests, now, 30000, 25).join(' , ') || 'none'));
+            console.log('[AD DEBUG] Ad watchdog — main-thread requests (last 30s): ' + (summarizeRecentRequests(recentMainRequests, now, 30000, 20).join(' | ') || 'none'));
             adWatchdogState.awaitingWorker = true;
             clearTimeout(adWatchdogState.workerTimer);
             adWatchdogState.workerTimer = setTimeout(() => {
@@ -2418,7 +2478,13 @@
                     console.log('[AD DEBUG] Ad watchdog — worker requests: no answer from the player worker');
                 }
             }, 2000);
-            postTwitchWorkerMessage('GetRecentRequests');
+            // Ask the player's own worker when it is hooked: twitchWorkers only holds the most recently
+            // constructed worker, and Twitch constructs more than one per page.
+            if (worker && hookedTwitchWorkers.has(worker)) {
+                worker.postMessage({ key: 'GetRecentRequests' });
+            } else {
+                postTwitchWorkerMessage('GetRecentRequests');
+            }
         } catch (err) {
             console.log('[AD DEBUG] Ad watchdog failed: ' + err.message);
         }
@@ -2427,8 +2493,8 @@
         if (!adWatchdogState.awaitingWorker) return;
         adWatchdogState.awaitingWorker = false;
         clearTimeout(adWatchdogState.workerTimer);
-        const list = Array.isArray(entries) ? summarizeRecentRequests(entries, Date.now(), 30000, 25) : [];
-        console.log('[AD DEBUG] Ad watchdog — worker requests (last 30s): ' + (list.join(' , ') || 'none'));
+        const list = Array.isArray(entries) ? summarizeRecentRequests(entries, Date.now(), 30000, 20) : [];
+        console.log('[AD DEBUG] Ad watchdog — worker requests (last 30s): ' + (list.join(' | ') || 'none'));
     }
     // Unhooked-worker recovery. The userscript manager can inject vaft after Twitch has already
     // constructed its player worker (document-start is not guaranteed). That worker never runs
@@ -3204,6 +3270,7 @@
                     }
                     if (v && (wasInitiallyUnmuted || shouldRecover)) {
                         if (wasInitiallyUnmuted) {
+                            playerBufferState.lastOwnMuteAt = Date.now();
                             v.muted = true;
                         }
                         // setSrc({isNewMediaPlayerInstance:true}) replaces the <video> element,
@@ -3605,17 +3672,26 @@
         }
     } catch {}
     console.log('[AD DEBUG] Config: ReloadPlayerAfterAd = ' + ReloadPlayerAfterAd + ', ForceAccessTokenPlayerType = ' + ForceAccessTokenPlayerType + ', PinBackupPlayerType = ' + PinBackupPlayerType);
-    // User mute intent: a mute/unmute of the player <video> within 1.5s of a click or keypress (Twitch's mute
-    // button, the "m" key) is the user's choice; mutes without user input are Twitch's own (autoplay policy,
-    // silent re-mute after a reload). Media events do not bubble, so listen in the capture phase on document.
+    // User mute intent: a mute/unmute of the player <video> within 1.5s of input aimed at the player (click,
+    // drag or wheel on the player, or a key pressed outside a text field: Twitch's mute button, volume slider,
+    // "m") is the user's choice; changes without such input are Twitch's own (autoplay policy, silent re-mute
+    // after a reload, volume restore on a new media element). Typing in chat does not count, and neither does
+    // vaft's own pre-mute during a hard reload: either would mark a Twitch re-mute as the user's and switch
+    // off its recovery. Media events do not bubble, so listen in the capture phase on document.
     function trackUserMuteIntent() {
-        const markInput = () => { playerBufferState.lastUserInputAt = Date.now(); };
-        document.addEventListener('pointerdown', markInput, true);
-        document.addEventListener('keydown', markInput, true);
+        const inPlayer = (el) => !!el && typeof el.closest === 'function' && !!el.closest('.video-player, [data-a-target="video-player"]');
+        const isTextField = (el) => !!el && (el.isContentEditable === true || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || ''));
+        const markPointer = (e) => { if (inPlayer(e.target)) playerBufferState.lastUserInputAt = Date.now(); };
+        document.addEventListener('pointerdown', markPointer, true);
+        document.addEventListener('pointerup', markPointer, true);
+        document.addEventListener('pointermove', (e) => { if (e.buttons) markPointer(e); }, true);// volume slider drag
+        document.addEventListener('wheel', markPointer, { capture: true, passive: true });
+        document.addEventListener('keydown', (e) => { if (!isTextField(e.target)) playerBufferState.lastUserInputAt = Date.now(); }, true);
         document.addEventListener('volumechange', (e) => {
             try {
                 const target = e.target;
                 if (!(target instanceof HTMLVideoElement) || target !== getPlayerVideoElement()) return;
+                if (target.muted && Date.now() - playerBufferState.lastOwnMuteAt < 1000) return;
                 if (Date.now() - playerBufferState.lastUserInputAt > 1500) return;
                 if (playerBufferState.userMuteIntent !== target.muted) {
                     playerBufferState.userMuteIntent = target.muted;

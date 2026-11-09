@@ -42,8 +42,8 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.6.0 / 68.9.0 | **Missed worker recovery.** If the userscript manager injects vaft after Twitch has started its video worker, no ad is ever detected on that page. vaft detects this, reloads the player once and, if that does not help, the page once (at most every 10 minutes per tab). |
 | 68.7.0 | **360p first** (`lowQualityFirst`). On an ad break the 360p backup stream is tried first, so playback continues with sound instead of freezing while ad-laden full-quality backups are probed. |
 | 68.8.0 | **Backup sequence alignment** (`alignBackupSequence`). Backup playlists numbered differently from the live playlist froze the picture for 10–30 seconds at the start of a break; they are renumbered onto the live numbering now. |
+| 68.9.1 | **Your mute is kept.** A mute set with the player button, the volume slider or the `m` key is no longer undone by the player reload after an ad break. |
 | 68.10.x | **Ad watchdog.** If Twitch shows its ad label or countdown, vaft logs a short snapshot (`Ad watchdog —` lines in the console) of where the ad came from, even when it did not detect the ad itself. Playlists that bypass vaft's filter are logged as `Untracked media playlist`. Diagnostic only. |
-| 68.9.1 | **Your mute is kept.** A mute set with the player button or the `m` key is no longer undone by the player reload after an ad break. |
 | 68.7.x / 68.8.1 | Extra `[AD DEBUG]` diagnostics: switch and playback timing at ad start/end, ads vaft cannot detect, every client-side ad request. |
 
 Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
@@ -114,6 +114,7 @@ Advanced settings (vaft):
 
 - Open the console (F12), type `AD DEBUG` into the filter and reload the page. See [DEBUG.md](DEBUG.md) for what the lines mean.
 - **Ads play although vaft is installed:** check for `Worker intercepted` after `vaft … loading`. If it is missing, see step 3 of [Install](#install).
+- **An ad plays although `Worker intercepted` is there:** vaft logs `Ad watchdog —` lines whenever Twitch shows its ad label or countdown, and `Untracked media playlist` when a playlist bypasses its filter. Include these lines in the issue.
 - More known issues: [issues.md](issues.md).
 - Still not working? [Open an issue](https://github.com/Helli24/TwitchAdSolutions/issues/new?template=bug_report.yml) with the `[AD DEBUG]` console lines.
 

@@ -34,7 +34,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.10.1/105, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.10.2/106, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
 
 ## localStorage Config
 
@@ -78,7 +78,7 @@ All read at init, injected into worker blob:
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Unhooked-worker recovery** — `checkUnhookedPlayerWorker()` (called from the buffer monitor) compares `player.core.worker` against the `hookedTwitchWorkers` WeakSet. A worker created before vaft loaded triggers `doTwitchPlayerTask(false, true, 'worker-recovery')` (hard reload, skips the healthy-player check), max 1 per page load; if the worker is still unhooked afterwards, `tryUnhookedPageReload()` reloads the page once per 10 min per tab (sessionStorage `twitchAdSolutions_unhookedPageReloadAt`; opt-out localStorage `twitchAdSolutions_unhookedPageReload=false`).
-- **Ad watchdog (diagnostic)** — `checkAdWatchdog(player)` (called from the buffer monitor) looks for Twitch's visible ad UI (`AdWatchdogSelectors`, text fallback `AdWatchdogTextPattern` inside the player). Once per appearance (re-armed after 10s without it) it logs `Ad watchdog —` lines: vaft break state, element/text, worker hook state, `<video>`/`<iframe>` sources, main-thread requests of the last 30s (`PerformanceObserver` → `recentMainRequests`) and worker requests (`GetRecentRequests` → `RecentWorkerRequests`, filled by `hookWorkerFetch`). URLs pass through `describeRequestUrl()` (host + path, no query). Read-only.
+- **Ad watchdog (diagnostic)** — `checkAdWatchdog(player)` (called from the buffer monitor) looks for Twitch's visible ad UI with non-empty text (`AdWatchdogSelectors`, text fallback `AdWatchdogTextPattern` inside the player). Once per appearance (re-armed after 10s without it) it logs `Ad watchdog —` lines: vaft break state, element/text, worker hook state, `<video>`/`<iframe>` sources, main-thread requests of the last 30s (`PerformanceObserver` → `recentMainRequests`) and worker requests (`GetRecentRequests` → `RecentWorkerRequests`, filled by `hookWorkerFetch`). URLs pass through `describeRequestUrl()` (host + path, no query). Read-only.
 - **User mute intent** — `trackUserMuteIntent()` (document capture listeners) sets `playerBufferState.userMuteIntent` when the player `<video>` is muted/unmuted within 1.5s of a pointerdown/keydown. Silent re-mute recovery on hard reload (`shouldRecover`) is skipped while it is true.
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
 - **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (46 fields vaft, 31 fields video-swap-new). Serialized into worker blob.

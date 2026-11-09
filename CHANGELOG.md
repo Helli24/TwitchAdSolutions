@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.10.2 (2026-11-09)
+
+### Fixed
+- **Ad watchdog used up its log on a false positive** — field log: right at page load, with the player still paused and without a source, the watchdog reported `element [data-a-target="ax-overlay"] ""`. That empty element stays on screen, so the once-per-appearance log was spent and never re-armed, and a real ad later in the session would not have been reported. `ax-overlay` is removed from the selectors, and every selector match now needs visible text (Twitch's ad label and countdown always have some). The main-thread request log also includes loads from before the first check now (`PerformanceObserver` with `buffered: true`). vaft only
+
 ## v68.10.1 (2026-11-09)
 
 ### Debug Logging

@@ -40,8 +40,8 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | Version | Change |
 |---|---|
 | 68.6.0 / 68.9.0 | **Missed worker recovery.** If the userscript manager injects vaft after Twitch has started its video worker, no ad is ever detected on that page. vaft detects this, reloads the player once and, if that does not help, the page once (at most every 10 minutes per tab). |
-| 68.7.x / 68.8.1 | Extra `[AD DEBUG]` diagnostics: switch and playback timing at ad start/end, ads vaft cannot detect, every client-side ad request. |
 | 68.7.0 | **360p first** (`lowQualityFirst`). On an ad break the 360p backup stream is tried first, so playback continues with sound instead of freezing while ad-laden full-quality backups are probed. |
+| 68.7.x / 68.8.1 | Extra `[AD DEBUG]` diagnostics: switch and playback timing at ad start/end, ads vaft cannot detect, every client-side ad request. |
 | 68.8.0 | **Backup sequence alignment** (`alignBackupSequence`). Backup playlists numbered differently from the live playlist froze the picture for 10–30 seconds at the start of a break; they are renumbered onto the live numbering now. |
 | 68.9.1 | **Your mute is kept.** A mute set with the player button, the volume slider or the `m` key is no longer undone by the player reload after an ad break. |
 | 68.10.x | **Ad watchdog.** If Twitch shows its ad label or countdown, vaft logs a short snapshot (`Ad watchdog —` lines in the console) of where the ad came from, even when it did not detect the ad itself. Playlists that bypass vaft's filter are logged as `Untracked media playlist`. Diagnostic only. |

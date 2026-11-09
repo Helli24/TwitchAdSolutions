@@ -57,7 +57,7 @@ function workerTests(format) {
     const W = format.loadWorker([
         'hasAdTags', 'getMatchedAdSignifiers', 'parseAttributes', 'getServerTimeFromM3u8',
         'replaceServerTimeInM3u8', 'getStreamUrlForResolution', 'stripAdSegments', 'createStreamInfo',
-        'getBackupSequenceOffset', 'shiftMediaSequence'
+        'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl'
     ]);
     const newStreamInfo = (overrides) => Object.assign(W.createStreamInfo('test', '', {}), overrides);
 
@@ -195,6 +195,17 @@ function workerTests(format) {
     const unshifted = playlist(5, 2, '2026-11-01T00:00:00Z');
     assertEq(W.shiftMediaSequence(unshifted, 0), unshifted, 'offset 0 leaves the playlist unchanged');
     assert(W.shiftMediaSequence(playlist(1000, 2, '2026-11-01T00:00:00Z'), -968).includes('#EXT-X-MEDIA-SEQUENCE:32'), 'negative offset shifts down');
+
+    // Fork: ad watchdog (68.10.0)
+    section('describeRequestUrl');
+    assertEq(W.describeRequestUrl('https://edge.ads.twitch.tv/ads?bp=midroll&token=secret'), 'edge.ads.twitch.tv/ads', 'drops the query (tokens)');
+    assertEq(W.describeRequestUrl('https://example.invalid/a#frag'), 'example.invalid/a', 'drops the fragment');
+    const longPath = W.describeRequestUrl('https://video-edge.example/v1/segment/' + 'x'.repeat(200) + '.ts');
+    assert(longPath.length <= 'video-edge.example'.length + 61 && longPath.endsWith('…'), 'cuts long paths to 60 chars');
+    assertEq(W.describeRequestUrl('blob:https://www.twitch.tv/1234'), null, 'blob: URLs are not requests');
+    assertEq(W.describeRequestUrl('not a url'), null, 'relative/invalid input gives null');
+    assertEq(W.describeRequestUrl(undefined), null, 'undefined gives null');
+    assert(Array.isArray(W.RecentWorkerRequests) && W.RecentWorkerRequests.length === 0, 'declareOptions creates the worker request ring buffer');
 }
 
 // ============================================================
@@ -303,6 +314,104 @@ function mainTests(format) {
     handlers.keydown();
     handlers.volumechange({ target: playerVideo });
     assertEq(state.userMuteIntent, false, 'unmute right after a keypress clears it');
+
+    // Fork: ad watchdog (68.10.0)
+    section('checkAdWatchdog');
+    const makeWatchdog = () => {
+        const logs = [];
+        const posted = [];
+        const visible = { getClientRects: () => [{}] };
+        const hidden = { getClientRects: () => [] };
+        const dom = { adUi: [], videos: [], iframes: [], playerRoot: null, textNodes: [] };
+        const ctx = format.loadMain(
+            ['hookedTwitchWorkers', 'describeRequestUrl', 'AdWatchdogSelectors', 'AdWatchdogTextPattern', 'adWatchdogState', 'recentMainRequests',
+                'startAdWatchdogRequestLog', 'summarizeRecentRequests', 'findVisibleAdUi', 'describeMediaElements',
+                'checkAdWatchdog', 'logAdWatchdogWorkerRequests'],
+            {
+                console: { log: (m) => logs.push(String(m)) },
+                document: {
+                    querySelectorAll: (selector) => selector === 'video' ? dom.videos : selector === 'iframe' ? dom.iframes
+                        : selector === '[data-a-target="video-ad-label"]' ? dom.adUi : [],
+                    querySelector: (selector) => selector === '[data-a-target="video-player"]' ? dom.playerRoot : null,
+                    createTreeWalker: () => {
+                        let i = 0;
+                        return { nextNode: () => dom.textNodes[i++] || null };
+                    }
+                },
+                NodeFilter: { SHOW_TEXT: 4 },
+                playerBufferState: { inAdBreak: false },
+                getPlayerVideoElement: () => dom.videos[0] || null,
+                postTwitchWorkerMessage: (key) => posted.push(key),
+                PerformanceObserver: class { observe() {} },
+                performance: { timeOrigin: 0 },
+                setTimeout: () => 1,
+                clearTimeout: () => {}
+            });
+        return { ctx, logs, posted, dom, visible, hidden };
+    };
+    let wd = makeWatchdog();
+    const playerWorker = { postMessage() {} };
+    const wdPlayer = { core: { worker: playerWorker } };
+    wd.ctx.hookedTwitchWorkers.add(playerWorker);
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    assertEq(wd.logs.length, 0, 'no ad UI: nothing logged');
+    wd.dom.adUi = [wd.hidden];
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    assertEq(wd.logs.length, 0, 'hidden ad UI element: nothing logged');
+    wd.dom.adUi = [Object.assign({ textContent: ' Ad 1 of 2\n 0:15 ' }, wd.visible)];
+    wd.dom.videos = [{ currentSrc: 'blob:https://www.twitch.tv/x', clientWidth: 1280, clientHeight: 720, paused: false, muted: false },
+        { currentSrc: 'https://m.media-amazon.com/ad.mp4?sig=secret', clientWidth: 1280, clientHeight: 720, paused: false, muted: false }];
+    // Buffer order is completion order: an old long request can follow a newer one
+    wd.ctx.recentMainRequests.push({ t: Date.now() - 5000, u: 'edge.ads.twitch.tv/ads' }, { t: Date.now() - 120000, u: 'old.example/x' });
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    const wdLog = wd.logs.join('\n');
+    assert(wdLog.includes('Twitch ad UI visible, vaft saw NO ad break'), 'visible ad UI without a break is reported');
+    assert(wdLog.includes('"Ad 1 of 2 0:15"'), 'reports the ad UI text with whitespace collapsed');
+    assert(wdLog.includes('player worker hooked'), 'reports the worker hook state');
+    assert(wdLog.includes('PLAYER blob 1280x720 playing') && wdLog.includes('m.media-amazon.com/ad.mp4'), 'lists the player video and the ad video host');
+    assert(!wdLog.includes('secret'), 'never logs query strings');
+    assert(wdLog.includes('edge.ads.twitch.tv/ads') && !wdLog.includes('old.example'), 'lists only requests from the last 30s');
+    assertDeepEq(wd.posted, ['GetRecentRequests'], 'asks the hooked worker for its requests');
+    const linesAfterFirst = wd.logs.length;
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    assertEq(wd.logs.length, linesAfterFirst, 'logs only once per ad UI appearance');
+    wd.ctx.logAdWatchdogWorkerRequests([{ t: Date.now() - 1000, u: 'video-weaver.example/v1/playlist/abc.m3u8' }]);
+    assert(wd.logs[wd.logs.length - 1].includes('worker requests (last 30s): video-weaver.example/v1/playlist/abc.m3u8'), 'logs the worker requests reply');
+    wd.ctx.logAdWatchdogWorkerRequests([{ t: Date.now(), u: 'late.example/x' }]);
+    assert(!wd.logs.join('\n').includes('late.example'), 'ignores worker replies nobody asked for');
+    wd.dom.adUi = [];
+    wd.ctx.adWatchdogState.lastSeenAt = Date.now() - 11000;
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    wd.dom.adUi = [Object.assign({ textContent: 'Ad' }, wd.visible)];
+    wd.ctx.playerBufferState.inAdBreak = true;
+    wd.ctx.checkAdWatchdog({ core: { worker: { postMessage() {} } } });
+    const rearmLog = wd.logs.slice(linesAfterFirst + 1).join('\n');
+    assert(rearmLog.includes('vaft IS blocking an ad break'), 're-arms after the UI was gone 10s and reports a blocked break');
+    assert(rearmLog.includes('player worker NOT hooked'), 'reports an unhooked player worker');
+
+    // Text fallback (attributes renamed) + video fed through srcObject (MSE in the worker)
+    wd = makeWatchdog();
+    const banner = Object.assign({ tagName: 'P', getAttribute: (a) => a === 'class' ? 'CoreText-sc-1' : null,
+        textContent: 'nyanners is taking an ad break; stick around to support the stream!' }, wd.visible);
+    const label = Object.assign({ tagName: 'SPAN', getAttribute: () => null, textContent: 'Ad (0:02)' }, wd.visible);
+    const bar = { textContent: '', parentElement: null };
+    banner.parentElement = bar;
+    label.parentElement = bar;
+    bar.textContent = banner.textContent + ' Ad (0:02)';
+    wd.dom.playerRoot = { textContent: 'Live ' + bar.textContent };
+    wd.dom.textNodes = [{ nodeValue: 'Live', parentElement: Object.assign({ tagName: 'DIV', getAttribute: () => null }, wd.hidden) },
+        { nodeValue: banner.textContent, parentElement: banner }, { nodeValue: 'Ad (0:02)', parentElement: label }];
+    class MediaSourceHandle {}
+    wd.dom.videos = [{ currentSrc: '', src: '', srcObject: new MediaSourceHandle(), clientWidth: 1259, clientHeight: 708, paused: false, muted: false }];
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    const textLog = wd.logs.join('\n');
+    assert(textLog.includes('text match <p class="CoreText-sc-1">'), 'text fallback names the matching element');
+    assert(textLog.includes('Ad (0:02)'), 'text fallback reports the surrounding ad UI text');
+    assert(textLog.includes('PLAYER srcObject:MediaSourceHandle 1259x708 playing'), 'describes a srcObject-fed player video');
+    wd = makeWatchdog();
+    wd.dom.playerRoot = { textContent: 'Live chat about ads' };
+    wd.ctx.checkAdWatchdog(wdPlayer);
+    assertEq(wd.logs.length, 0, 'no ad UI text in the player: nothing logged');
 }
 
 for (const format of formats) {

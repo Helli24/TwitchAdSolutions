@@ -1,5 +1,10 @@
 ## Unreleased
 
+## v68.10.0 (2026-11-09)
+
+### Debug Logging
+- **Ad watchdog** — field reports: midrolls with Twitch's ad UI (`<channel> is taking an ad break; stick around to support the stream! Ad (0:02)`, stream audio gone) played while vaft logged nothing at all, so the path the ad took could not be reconstructed afterwards. The buffer monitor now checks whether Twitch's ad UI is visible (ad label / countdown attributes, with a text fallback inside the player for `taking an ad break` / `Ad (m:ss)`). Once per appearance it logs three or four `Ad watchdog —` lines: whether vaft saw an ad break, the matched element and its text, whether the player worker is hooked; every `<video>` (source host, or `srcObject` type for MSE-in-worker playback) and visible `<iframe>`; the hosts and paths requested in the last 30 s on the main thread (`PerformanceObserver`) and in the hooked worker (new worker-serialized `describeRequestUrl()`, ring buffer `RecentWorkerRequests`, fetched via a `GetRecentRequests` message). Query strings and fragments are never logged. Read-only: nothing is hidden, reloaded or blocked. vaft only
+
 ## v68.9.2 (2026-11-08)
 
 ### Tests

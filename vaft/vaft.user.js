@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/Helli24/TwitchAdSolutions
-// @version      68.9.2
+// @version      68.10.0
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 103;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 104;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -129,6 +129,7 @@
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
+        scope.RecentWorkerRequests = [];// Ad watchdog: last 100 worker fetches as { t, u } (host + truncated path, no query)
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
     }
@@ -366,6 +367,7 @@
                     ${videoCodecFamily.toString()}
                     ${getBackupSequenceOffset.toString()}
                     ${shiftMediaSequence.toString()}
+                    ${describeRequestUrl.toString()}
                     ${getStreamUrlForResolution.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
@@ -442,6 +444,8 @@
                             }
                         } else if (e.data.key == 'TriggeredPlayerReload') {
                             HasTriggeredPlayerReload = true;
+                        } else if (e.data.key == 'GetRecentRequests') {
+                            postMessage({ key: 'RecentRequests', value: RecentWorkerRequests.slice() });
                         } else if (e.data.key == 'ReloadSkipped') {
                             // Main thread refused the reload (player healthy) — clear the
                             // early-reload flags so we can re-fire if the player later stalls.
@@ -510,6 +514,8 @@
                             if (driftCatchUpTimeout) { clearTimeout(driftCatchUpTimeout); driftCatchUpTimeout = null; }
                             try { getPlayerVideoElement().playbackRate = 1.0; } catch {}
                         }
+                    } else if (e.data.key == 'RecentRequests') {
+                        logAdWatchdogWorkerRequests(e.data.value);
                     } else if (e.data.key == 'PauseResumePlayer') {
                         doTwitchPlayerTask(true, false);
                     } else if (e.data.key == 'ReloadPlayer') {
@@ -578,6 +584,13 @@
         const BLANK_MP4 = new Blob([Uint8Array.from(atob('AAAAKGZ0eXBtcDQyAAAAAWlzb21tcDQyZGFzaGF2YzFpc282aGxzZgAABEltb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAYagAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAABqHRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAURtZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAALuAAAAAAFXEAAAAAAAtaGRscgAAAAAAAAAAc291bgAAAAAAAAAAAAAAAFNvdW5kSGFuZGxlcgAAAADvbWluZgAAABBzbWhkAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAACzc3RibAAAAGdzdHNkAAAAAAAAAAEAAABXbXA0YQAAAAAAAAABAAAAAAAAAAAAAgAQAAAAALuAAAAAAAAzZXNkcwAAAAADgICAIgABAASAgIAUQBUAAAAAAAAAAAAAAAWAgIACEZAGgICAAQIAAAAQc3R0cwAAAAAAAAAAAAAAEHN0c2MAAAAAAAAAAAAAABRzdHN6AAAAAAAAAAAAAAAAAAAAEHN0Y28AAAAAAAAAAAAAAeV0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAoAAAAFoAAAAAAGBbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAA9CQAAAAABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABLG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAOxzdGJsAAAAoHN0c2QAAAAAAAAAAQAAAJBhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAoABaABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAOmF2Y0MBTUAe/+EAI2dNQB6WUoFAX/LgLUBAQFAAAD6AAA6mDgAAHoQAA9CW7y4KAQAEaOuPIAAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAASG12ZXgAAAAgdHJleAAAAAAAAAABAAAAAQAAAC4AAAAAAoAAAAAAACB0cmV4AAAAAAAAAAIAAAABAACCNQAAAAACQAAA'), c => c.charCodeAt(0))], {type: 'video/mp4'});
         const realFetch = fetch;
         fetch = async function(url, options) {
+            try {
+                const described = describeRequestUrl(typeof url === 'string' ? url : url && url.url);
+                if (described) {
+                    RecentWorkerRequests.push({ t: Date.now(), u: described });
+                    if (RecentWorkerRequests.length > 100) RecentWorkerRequests.shift();
+                }
+            } catch {}
             if (typeof url === 'string') {
                 if (AdSegmentCache.has(url)) {
                     return new Response(BLANK_MP4);
@@ -1149,6 +1162,19 @@
         }
         return m3u8.replace(/#EXT-X-MEDIA-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-MEDIA-SEQUENCE:' + (parseInt(seq) + offset))
             .replace(/#EXT-X-TWITCH-LIVE-SEQUENCE:(\d+)/, (match, seq) => '#EXT-X-TWITCH-LIVE-SEQUENCE:' + (parseInt(seq) + offset));
+    }
+    // Ad watchdog: host + path of a request URL, without query/fragment (tokens live there), path cut to
+    // 60 chars (segment paths are long opaque tokens). null for anything that is not an absolute URL.
+    // Worker-serialized; also used on the main thread.
+    function describeRequestUrl(url) {
+        try {
+            const parsed = new URL(url);
+            if (!/^https?:$/.test(parsed.protocol)) return null;
+            const p = parsed.pathname.length > 60 ? parsed.pathname.slice(0, 60) + '…' : parsed.pathname;
+            return parsed.host + p;
+        } catch {
+            return null;
+        }
     }
     function videoCodecFamily(codecs) {
         if (!codecs) return 'unknown';
@@ -2236,6 +2262,140 @@
             }
         }, tickMs);
     }
+    // Ad watchdog (diagnostic only). Twitch shows its own ad UI (ad label / countdown) whenever its player
+    // plays an ad. If that UI is visible while vaft has no ad break, the ad reached the player by a path vaft
+    // does not observe (field report: midroll with countdown, stream audio gone, no [AD DEBUG] line at all).
+    // Once per appearance, log a snapshot: matched element and text, every <video>/<iframe> with its source
+    // host, whether the player's worker is hooked, and the hosts requested in the last 30s on the main thread
+    // (PerformanceObserver ring buffer) and in the hooked worker (RecentWorkerRequests, fetched by message).
+    // Read-only: nothing is hidden, reloaded or blocked. Detection selectors may be broad because they only read.
+    const AdWatchdogSelectors = [
+        '[data-a-target="video-ad-label"]',
+        '[data-a-target="video-ad-countdown"]',
+        '[data-a-target="ax-overlay"]',
+        '[data-test-selector="ad-banner-default-id"]',
+        '[data-a-target*="video-ad"]',
+        '[data-test-selector*="video-ad"]'
+    ];
+    const adWatchdogState = {
+        visibleSince: 0,
+        lastSeenAt: 0,
+        logged: false,
+        awaitingWorker: false,
+        workerTimer: null,
+        observerStarted: false
+    };
+    const recentMainRequests = [];// { t, u } — last 100 main-thread resource loads
+    function startAdWatchdogRequestLog() {
+        if (adWatchdogState.observerStarted) return;
+        adWatchdogState.observerStarted = true;
+        try {
+            new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    const u = describeRequestUrl(entry.name);
+                    if (!u) continue;
+                    recentMainRequests.push({ t: Math.round(performance.timeOrigin + entry.startTime), u: u });
+                    if (recentMainRequests.length > 100) recentMainRequests.shift();
+                }
+            }).observe({ type: 'resource', buffered: false });
+        } catch (err) {
+            console.log('[AD DEBUG] Ad watchdog: request log unavailable (' + err.message + ')');
+        }
+    }
+    // Unique request descriptions from the last windowMs, newest last, at most max entries. Entries are
+    // appended when a request completes, so a long request can sit after newer ones: skip, don't stop.
+    function summarizeRecentRequests(entries, now, windowMs, max) {
+        const seen = new Set();
+        const result = [];
+        for (let i = entries.length - 1; i >= 0 && result.length < max; i--) {
+            const entry = entries[i];
+            if (now - entry.t > windowMs) continue;
+            if (seen.has(entry.u)) continue;
+            seen.add(entry.u);
+            result.unshift(entry.u);
+        }
+        return result;
+    }
+    // Text fallback for when Twitch renames the attributes above. Field report (English UI):
+    // "<channel> is taking an ad break; stick around to support the stream! Ad (0:02)" + an "Ad" badge.
+    const AdWatchdogTextPattern = /taking an ad break|\bAd \(\d{1,2}:\d{2}\)|Werbepause|\bWerbung \(\d{1,2}:\d{2}\)/;
+    function findVisibleAdUi() {
+        const describe = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+        for (const selector of AdWatchdogSelectors) {
+            for (const el of document.querySelectorAll(selector)) {
+                if (el.getClientRects && el.getClientRects().length > 0) {
+                    return { selector: selector, text: describe(el) };
+                }
+            }
+        }
+        // Only the player subtree is searched; textContent needs no layout, the walk runs only on a hit
+        const root = document.querySelector('[data-a-target="video-player"]') || document.querySelector('.video-player');
+        if (!root || !AdWatchdogTextPattern.test(root.textContent || '')) return null;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const el = node.parentElement;
+            if (el && AdWatchdogTextPattern.test(node.nodeValue) && el.getClientRects().length > 0) {
+                const attrs = ['data-a-target', 'data-test-selector', 'class'].map((a) => el.getAttribute(a) ? a + '="' + String(el.getAttribute(a)).slice(0, 60) + '"' : '').filter(Boolean);
+                return { selector: 'text match <' + el.tagName.toLowerCase() + (attrs.length ? ' ' + attrs.join(' ') : '') + '>', text: describe(el.parentElement || el) };
+            }
+        }
+        return null;
+    }
+    function describeMediaElements() {
+        const playerVideo = (() => { try { return getPlayerVideoElement(); } catch { return null; } })();
+        const videos = [...document.querySelectorAll('video')].map((v) => {
+            const src = v.currentSrc || v.src || '';
+            // No src but a srcObject: MediaSourceHandle (MSE in the worker) or MediaStream
+            const host = src.startsWith('blob:') ? 'blob' : (describeRequestUrl(src) || (src ? 'other' : (v.srcObject ? 'srcObject:' + (v.srcObject.constructor?.name || 'object') : 'none')));
+            return (v === playerVideo ? 'PLAYER ' : '') + host + ' ' + v.clientWidth + 'x' + v.clientHeight + (v.paused ? ' paused' : ' playing') + (v.muted ? ' muted' : '');
+        });
+        const iframes = [...document.querySelectorAll('iframe')].filter((f) => f.getClientRects().length > 0).map((f) => (describeRequestUrl(f.src) || 'about:blank') + ' ' + f.clientWidth + 'x' + f.clientHeight);
+        return { videos: videos, iframes: iframes };
+    }
+    function checkAdWatchdog(player) {
+        try {
+            startAdWatchdogRequestLog();
+            const ui = findVisibleAdUi();
+            const now = Date.now();
+            if (!ui) {
+                // Re-arm once the ad UI has been gone for 10s (next ad, next log)
+                if (adWatchdogState.logged && now - adWatchdogState.lastSeenAt > 10000) {
+                    adWatchdogState.logged = false;
+                    adWatchdogState.visibleSince = 0;
+                }
+                return;
+            }
+            adWatchdogState.lastSeenAt = now;
+            if (!adWatchdogState.visibleSince) adWatchdogState.visibleSince = now;
+            if (adWatchdogState.logged) return;
+            adWatchdogState.logged = true;
+            const worker = player?.core?.worker;
+            const hooked = worker ? (hookedTwitchWorkers.has(worker) ? 'hooked' : 'NOT hooked') : 'unknown';
+            const media = describeMediaElements();
+            const vaftState = playerBufferState.inAdBreak ? 'vaft IS blocking an ad break (ad UI shown anyway)' : 'vaft saw NO ad break';
+            console.log('[AD DEBUG] Ad watchdog — Twitch ad UI visible, ' + vaftState + ' | element ' + ui.selector + ' "' + ui.text + '" | player worker ' + hooked);
+            console.log('[AD DEBUG] Ad watchdog — videos: ' + (media.videos.join(' ; ') || 'none') + ' | iframes: ' + (media.iframes.join(' ; ') || 'none'));
+            console.log('[AD DEBUG] Ad watchdog — main-thread requests (last 30s): ' + (summarizeRecentRequests(recentMainRequests, now, 30000, 25).join(' , ') || 'none'));
+            adWatchdogState.awaitingWorker = true;
+            clearTimeout(adWatchdogState.workerTimer);
+            adWatchdogState.workerTimer = setTimeout(() => {
+                if (adWatchdogState.awaitingWorker) {
+                    adWatchdogState.awaitingWorker = false;
+                    console.log('[AD DEBUG] Ad watchdog — worker requests: no answer from the player worker');
+                }
+            }, 2000);
+            postTwitchWorkerMessage('GetRecentRequests');
+        } catch (err) {
+            console.log('[AD DEBUG] Ad watchdog failed: ' + err.message);
+        }
+    }
+    function logAdWatchdogWorkerRequests(entries) {
+        if (!adWatchdogState.awaitingWorker) return;
+        adWatchdogState.awaitingWorker = false;
+        clearTimeout(adWatchdogState.workerTimer);
+        const list = Array.isArray(entries) ? summarizeRecentRequests(entries, Date.now(), 30000, 25) : [];
+        console.log('[AD DEBUG] Ad watchdog — worker requests (last 30s): ' + (list.join(' , ') || 'none'));
+    }
     // Unhooked-worker recovery. The userscript manager can inject vaft after Twitch has already
     // constructed its player worker (document-start is not guaranteed). That worker never runs
     // hookWorkerFetch, so no ad break is ever detected and SSAI ads play unblocked for the whole
@@ -2328,6 +2488,7 @@
                     state: playerAndState.state
                 };
                 checkUnhookedPlayerWorker(playerAndState.player);
+                checkAdWatchdog(playerAndState.player);
                 const video = playerAndState.player.getHTMLVideoElement?.();
                 if (video && !video.__tasIntentHooked) {
                     video.__tasIntentHooked = true;

@@ -57,7 +57,7 @@ function workerTests(format) {
     const W = format.loadWorker([
         'hasAdTags', 'getMatchedAdSignifiers', 'parseAttributes', 'getServerTimeFromM3u8',
         'replaceServerTimeInM3u8', 'getStreamUrlForResolution', 'stripAdSegments', 'createStreamInfo',
-        'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl'
+        'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl', 'noteUntrackedPlaylist'
     ]);
     const newStreamInfo = (overrides) => Object.assign(W.createStreamInfo('test', '', {}), overrides);
 
@@ -206,6 +206,27 @@ function workerTests(format) {
     assertEq(W.describeRequestUrl('not a url'), null, 'relative/invalid input gives null');
     assertEq(W.describeRequestUrl(undefined), null, 'undefined gives null');
     assert(Array.isArray(W.RecentWorkerRequests) && W.RecentWorkerRequests.length === 0, 'declareOptions creates the worker request ring buffer');
+
+    // Fork: untracked-playlist diagnostic (68.10.1)
+    section('noteUntrackedPlaylist');
+    const cleanList = playlist(100, 3, '2026-11-09T00:00:00Z');
+    const adList = cleanList.replace('#EXTINF', '#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad"\n#EXTINF');
+    const t0 = 1000000;
+    assertEq(W.noteUntrackedPlaylist('https://v.example/a.m3u8', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nx.m3u8', t0), null, 'master playlists are ignored');
+    const first = W.noteUntrackedPlaylist('https://v.example/a.m3u8?token=secret', cleanList, t0);
+    assert(first && first.includes('Untracked media playlist — v.example/a.m3u8') && first.includes('ad markers: none'), 'first sighting of an untracked media playlist is logged');
+    assert(!first.includes('secret'), 'no query string in the log');
+    assertEq(W.noteUntrackedPlaylist('https://v.example/a.m3u8', cleanList, t0 + 2000), null, 'repeat polls without ads stay quiet');
+    const adLine = W.noteUntrackedPlaylist('https://v.example/a.m3u8', adList, t0 + 4000);
+    assert(adLine && adLine.includes('carries ads (NOT BLOCKED)') && adLine.includes('stitched-ad'), 'ads in a known untracked playlist are reported');
+    assertEq(W.noteUntrackedPlaylist('https://v.example/a.m3u8', adList, t0 + 6000), null, 'ad reports are rate-limited to 30s');
+    assert(W.noteUntrackedPlaylist('https://v.example/a.m3u8', adList, t0 + 35000) !== null, 'and repeat after 30s');
+    const firstWithAds = W.noteUntrackedPlaylist('https://v.example/b.m3u8', adList, t0);
+    assert(firstWithAds.includes('(ADS NOT BLOCKED)'), 'a first sighting with ads says so');
+    for (const name of ['c', 'd', 'e']) W.noteUntrackedPlaylist('https://v.example/' + name + '.m3u8', cleanList, t0);
+    assertEq(W.noteUntrackedPlaylist('https://v.example/f.m3u8', cleanList, t0), null, 'at most 5 distinct URLs are logged');
+    assert(W.noteUntrackedPlaylist('https://v.example/g.m3u8', adList, t0) !== null, 'over the cap, ads are still reported');
+    assertEq(W.noteUntrackedPlaylist('https://v.example/h.m3u8', adList, t0 + 1000), null, 'over the cap, one ad report per 30s overall');
 }
 
 // ============================================================

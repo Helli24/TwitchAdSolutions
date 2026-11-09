@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 104;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 105;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -117,6 +117,7 @@ twitch-videoad.js text/javascript
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
+        scope.UntrackedPlaylists = Object.create(null);// Untracked-playlist diagnostic: described URL -> { firstAt, lastAdLogAt }
         scope.RecentWorkerRequests = [];// Ad watchdog: last 100 worker fetches as { t, u } (host + truncated path, no query)
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
@@ -339,6 +340,7 @@ twitch-videoad.js text/javascript
                     ${getBackupSequenceOffset.toString()}
                     ${shiftMediaSequence.toString()}
                     ${describeRequestUrl.toString()}
+                    ${noteUntrackedPlaylist.toString()}
                     ${getStreamUrlForResolution.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
@@ -1087,6 +1089,32 @@ twitch-videoad.js text/javascript
     // Ad watchdog: host + path of a request URL, without query/fragment (tokens live there), path cut to
     // 60 chars (segment paths are long opaque tokens). null for anything that is not an absolute URL.
     // Worker-serialized; also used on the main thread.
+    // Diagnostic for the one silent path in processM3U8: a media playlist whose URL is not in
+    // StreamInfosByUrl passes through untouched, ad segments included. That happens when the player
+    // got its variant URLs from a master playlist vaft never parsed (usher URL not matched, or the
+    // master fetched outside the hooked worker). Returns a log line or null: the first sighting of
+    // each URL (max 5 URLs per worker), then at most every 30s per URL while it carries ad markers.
+    // Worker-serialized.
+    function noteUntrackedPlaylist(url, textStr, now) {
+        if (!textStr || !textStr.includes('#EXTINF')) return null;
+        const described = describeRequestUrl(url) || 'unparsable URL';
+        const signifiers = AdSignifiers.filter((s) => s && textStr.includes(s));
+        let entry = UntrackedPlaylists[described];
+        if (!entry) {
+            if (Object.keys(UntrackedPlaylists).length >= 5) {
+                if (signifiers.length === 0) return null;
+                // Over the URL cap, still report ads, but only once per 30s across all URLs
+                entry = UntrackedPlaylists['*'] || (UntrackedPlaylists['*'] = { firstAt: now, lastAdLogAt: 0 });
+            } else {
+                UntrackedPlaylists[described] = { firstAt: now, lastAdLogAt: signifiers.length ? now : 0 };
+                return '[AD DEBUG] Untracked media playlist — ' + described + ' is not from a master playlist vaft parsed, passed through unfiltered | ad markers: ' +
+                    (signifiers.length ? signifiers.join(', ') + ' (ADS NOT BLOCKED)' : 'none') + ' | tracked variant URLs: ' + Object.keys(StreamInfosByUrl).length;
+            }
+        }
+        if (signifiers.length === 0 || now - entry.lastAdLogAt < 30000) return null;
+        entry.lastAdLogAt = now;
+        return '[AD DEBUG] Untracked media playlist carries ads (NOT BLOCKED) — ' + described + ' | ad markers: ' + signifiers.join(', ');
+    }
     function describeRequestUrl(url) {
         try {
             const parsed = new URL(url);
@@ -1151,6 +1179,10 @@ twitch-videoad.js text/javascript
     async function processM3U8(url, textStr, realFetch) {
         const streamInfo = StreamInfosByUrl[url];
         if (!streamInfo) {
+            const untrackedLog = noteUntrackedPlaylist(url, textStr, Date.now());
+            if (untrackedLog) {
+                console.log(untrackedLog);
+            }
             return textStr;
         }
         streamInfo.LastSeenAt = Date.now();

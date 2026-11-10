@@ -83,6 +83,13 @@ function loadFormat(format) {
     const declarations = collectDeclarations(source, format.name);
     return {
         name: format.name,
+        // Source text of a declaration (for checks on the code itself, e.g. the worker blob template)
+        declarationSource(name) {
+            return pick(declarations, [name], format.name);
+        },
+        hasDeclaration(name) {
+            return declarations.has(name);
+        },
         // Worker scope: declareOptions(self) + the given worker-serialized functions
         loadWorker(functionNames) {
             const context = vm.createContext({ console: { log() {}, warn() {}, error() {} }, URL });

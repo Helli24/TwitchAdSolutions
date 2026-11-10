@@ -57,7 +57,8 @@ function workerTests(format) {
     const W = format.loadWorker([
         'hasAdTags', 'getMatchedAdSignifiers', 'parseAttributes', 'getServerTimeFromM3u8',
         'replaceServerTimeInM3u8', 'getStreamUrlForResolution', 'stripAdSegments', 'createStreamInfo',
-        'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl', 'noteUntrackedPlaylist'
+        'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl', 'noteUntrackedPlaylist',
+        'planUntrackedAdReload', 'pruneStreamInfos', 'processM3U8'
     ]);
     const newStreamInfo = (overrides) => Object.assign(W.createStreamInfo('test', '', {}), overrides);
 
@@ -253,6 +254,69 @@ function workerTests(format) {
     assertEq(W.noteUntrackedPlaylist('https://v.example/f.m3u8', cleanList, t0), null, 'at most 5 distinct URLs are logged');
     assert(W.noteUntrackedPlaylist('https://v.example/g.m3u8', adList, t0) !== null, 'over the cap, ads are still reported');
     assertEq(W.noteUntrackedPlaylist('https://v.example/h.m3u8', adList, t0 + 1000), null, 'over the cap, one ad report per 30s overall');
+
+    // Fork: player reload when an untracked playlist carries ads (68.11.0)
+    section('planUntrackedAdReload');
+    assertEq(W.planUntrackedAdReload(cleanList, t0), null, 'no ad markers: nothing to do');
+    assertEq(W.planUntrackedAdReload('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nx.m3u8', t0), null, 'master playlists are ignored');
+    assertEq(W.planUntrackedAdReload(adList + '\n#EXT-X-ENDLIST', t0), null, 'ended/VOD playlists are ignored');
+    const firstReload = W.planUntrackedAdReload(adList, t0);
+    assert(firstReload && firstReload.reload === true && firstReload.log.includes('(1/2 in 10 minutes)'), 'ads in an untracked live playlist ask for a player reload');
+    assertEq(W.planUntrackedAdReload(adList, t0 + 2000), null, 'the next polls within 30s do not ask again');
+    const secondReload = W.planUntrackedAdReload(adList, t0 + 31000);
+    assert(secondReload && secondReload.reload === true && secondReload.log.includes('(2/2'), 'a second reload is allowed after 30s');
+    const gaveUp = W.planUntrackedAdReload(adList, t0 + 62000);
+    assert(gaveUp && gaveUp.reload === false && gaveUp.log.includes('giving up'), 'after two reloads in 10 minutes it gives up and says so');
+    assertEq(W.planUntrackedAdReload(adList, t0 + 93000), null, 'the giving-up line is logged once, not on every poll');
+    const afterWindow = W.planUntrackedAdReload(adList, t0 + 31000 + 600001);
+    assert(afterWindow && afterWindow.reload === true && afterWindow.log.includes('(1/2'), 'the budget is back once the reloads are older than 10 minutes');
+    W.UntrackedReload = false;
+    W.UntrackedAdReloads.length = 0;
+    assertEq(W.planUntrackedAdReload(adList, t0), null, 'opt-out disables the reload');
+    W.UntrackedReload = true;
+    // processM3U8 itself: an unknown playlist with ads is passed through and the worker asks for the reload.
+    // The untracked branch has no await, so its effects are visible right after the call.
+    const workerMessages = [];
+    W.postMessage = (message) => workerMessages.push(message);
+    W.processM3U8('https://v.example/unknown-with-ads.m3u8', adList, null);
+    assertDeepEq(workerMessages, [{ key: 'ReloadPlayer', kind: 'untracked-ads' }], 'processM3U8 posts ReloadPlayer (untracked-ads) for an unknown playlist with ads');
+    W.processM3U8('https://v.example/unknown-with-ads.m3u8', adList, null);
+    assertEq(workerMessages.length, 1, 'and does not repeat it on the next poll');
+    workerMessages.length = 0;
+    W.UntrackedAdReloads.length = 0;
+    W.processM3U8('https://v.example/unknown-clean.m3u8', cleanList, null);
+    assertEq(workerMessages.length, 0, 'an unknown playlist without ads triggers no reload');
+
+    // Fork: a paused player keeps its stream registered (68.11.0)
+    section('pruneStreamInfos');
+    const maxAge = W.StreamInfoMaxAgeMs;
+    const addStream = (name, seenAgoMs) => {
+        const info = W.createStreamInfo(name, '', {});
+        info.LastSeenAt = Date.now() - seenAgoMs;
+        info.Urls['https://v.example/' + name + '.m3u8'] = {};
+        W.StreamInfos[name] = info;
+        W.StreamInfosByUrl['https://v.example/' + name + '.m3u8'] = info;
+        return info;
+    };
+    const tracked = () => Object.keys(W.StreamInfosByUrl).sort().join(',');
+    for (const key of Object.keys(W.StreamInfos)) delete W.StreamInfos[key];
+    for (const key of Object.keys(W.StreamInfosByUrl)) delete W.StreamInfosByUrl[key];
+    addStream('paused', 3 * 60 * 60 * 1000);
+    W.pruneStreamInfos();
+    assertEq(tracked(), 'https://v.example/paused.m3u8', 'the only stream stays registered however long it was not polled (paused player)');
+    addStream('paused2', 2 * 60 * 60 * 1000);
+    W.pruneStreamInfos();
+    assertEq(Object.keys(W.StreamInfos).length, 2, 'two paused streams: neither is pruned');
+    addStream('watching', 1000);
+    W.pruneStreamInfos();
+    assertEq(Object.keys(W.StreamInfos).join(','), 'watching', 'streams left for another one are pruned once that one is being polled');
+    assertEq(tracked(), 'https://v.example/watching.m3u8', 'pruning removes the variant URLs of the pruned streams only');
+    addStream('recent', maxAge - 60000);
+    W.pruneStreamInfos();
+    assertEq(Object.keys(W.StreamInfos).sort().join(','), 'recent,watching', 'a stream polled within the window is kept');
+    W.StreamInfos.broken = null;
+    W.pruneStreamInfos();
+    assert(!('broken' in W.StreamInfos), 'malformed entries are removed');
 }
 
 // ============================================================
@@ -329,6 +393,28 @@ function mainTests(format) {
     t.ctx.checkUnhookedPlayerWorker(t.player);
     t.tickAfterWait();
     assertEq(t.calls.playerTask.length, 0, 'paused video: no recovery');
+
+    // The worker blob is a template literal evaluated when Twitch constructs its worker: a serialized
+    // function or injected option that does not exist is a ReferenceError there, which no syntax check sees.
+    section('worker blob references');
+    const blobSource = format.declarationSource('hookWindowWorker');
+    const optionsSource = format.declarationSource('declareOptions');
+    const serializedNames = [...blobSource.matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map((m) => m[1]);
+    assert(serializedNames.length >= 20, 'finds the functions serialized into the worker blob (' + serializedNames.length + ')');
+    assertDeepEq(serializedNames.filter((name) => !format.hasDeclaration(name)), [], 'every function serialized into the worker blob is declared');
+    for (const name of ['processM3U8', 'hookWorkerFetch', 'pruneStreamInfos', 'noteUntrackedPlaylist', 'planUntrackedAdReload', 'describeRequestUrl', 'shiftMediaSequence', 'getBackupSequenceOffset']) {
+        assert(serializedNames.includes(name), name + ' is serialized into the worker blob');
+    }
+    const injectedOptions = [...blobSource.matchAll(/^\s*(\w+) = \$\{(\w+)\};/gm)];
+    assert(injectedOptions.length >= 10, 'finds the options injected into the worker blob (' + injectedOptions.length + ')');
+    assertDeepEq(injectedOptions.filter((m) => m[1] !== m[2] || !optionsSource.includes('scope.' + m[1] + ' = ')).map((m) => m[0].trim()), [], 'every injected option is declared in declareOptions under the same name');
+    assert(injectedOptions.some((m) => m[1] === 'UntrackedReload'), 'UntrackedReload is injected into the worker blob');
+
+    // Fork: reload kinds that replace a healthy player (68.11.0)
+    section('isRecoveryReloadKind');
+    const kinds = format.loadMain(['isRecoveryReloadKind'], {});
+    assert(kinds.isRecoveryReloadKind('worker-recovery') && kinds.isRecoveryReloadKind('untracked-ads'), 'worker-recovery and untracked-ads replace a healthy player');
+    assert(!kinds.isRecoveryReloadKind('early') && !kinds.isRecoveryReloadKind('post-ad') && !kinds.isRecoveryReloadKind(undefined), 'early, post-ad and plain reloads keep the healthy-player check');
 
     // Fork: user mute intent (68.9.1, input filter 68.10.3)
     section('trackUserMuteIntent');

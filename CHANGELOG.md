@@ -1,5 +1,17 @@
 ## Unreleased
 
+## v68.11.0 (2026-11-10)
+
+### Fixed
+- **Ads played after the player had been paused for 30 minutes** — field log (v107): a stream opened at 18:13, the player paused in a background tab, and at 21:02 an ad played on resume with `Untracked media playlist … | ad markers: stitched-ad, twitch-stitched (ADS NOT BLOCKED) | tracked variant URLs: 0` and `Ad watchdog — Twitch ad UI visible, vaft saw NO ad break`. The ad was marked normally; vaft no longer knew the playlist. `pruneStreamInfos()` runs every 5 minutes and dropped every stream that had not been polled for 30 minutes. A paused player polls nothing, but it keeps its variant URLs and resumes with them, so after the prune `processM3U8` passed the playlist through unfiltered for the rest of the page session. A stale stream is now pruned only while another stream in the same worker is being polled (the user moved on to another channel); a paused player keeps its stream registered. vaft only
+
+### Added
+- **Player reload when an unknown playlist carries ads** (`UntrackedReload`, fork default on) — safety net for any other way the stream registration can get lost. When a live playlist that vaft does not track carries ad markers, the worker asks for one hard player reload (`ReloadPlayer` kind `untracked-ads`, handled like `worker-recovery`: it replaces a healthy player and refreshes the token). The new media player instance requests the master playlist again through `hookWorkerFetch`, which registers the stream, and the ad is blocked from then on. Limits: one reload per 30 s and two per 10 minutes, then a single `giving up` line. Logs `Untracked playlist carries ads — reloading the player …`. Opt-out: `twitchAdSolutions_untrackedReload='false'`. vaft only
+
+### Tests
+- 371 checks: `pruneStreamInfos` (paused stream kept, left streams pruned), `planUntrackedAdReload` (limits, giving up, opt-out), the untracked branch of `processM3U8` end to end, `isRecoveryReloadKind`.
+- New check on the worker blob template: every function serialized into it (`${name.toString()}`) is declared and every injected option exists in `declareOptions`. A missing one is a `ReferenceError` when Twitch constructs its worker, which no syntax check sees.
+
 ## v68.10.3 (2026-11-09)
 
 Result of a review of all fork changes (68.6.0-68.10.2).

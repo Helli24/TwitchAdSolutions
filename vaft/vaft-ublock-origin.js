@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 107;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 108;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -117,16 +117,34 @@ twitch-videoad.js text/javascript
         scope.V2API = false;
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
+        scope.UntrackedReload = true;// Fork default: reload the player (max 2 per 10 min) when an untracked live playlist carries ad markers. Opt-out: twitchAdSolutions_untrackedReload=false
+        scope.UntrackedAdReloads = [];// planUntrackedAdReload: timestamps of the reloads it asked for in the last 10 minutes
+        scope.UntrackedAdReloadGaveUpAt = 0;// planUntrackedAdReload: last "giving up" log
         scope.UntrackedPlaylists = Object.create(null);// Untracked-playlist diagnostic: described URL -> { firstAt, lastAdLogAt }
         scope.RecentWorkerRequests = [];// Ad watchdog: last 100 worker fetches as { t, u } (host + truncated path, no query)
         scope.AllSegmentsAreAdSegments = false;
         scope.StreamInfoMaxAgeMs = 30 * 60 * 1000;
     }
+    // Drops streams the player has left: not polled for StreamInfoMaxAgeMs while another stream in this
+    // worker was. Age alone is not enough. A paused player polls nothing but keeps its variant URLs and
+    // resumes with them; pruning that stream left the URLs unknown to processM3U8, which then passed the
+    // playlist through unfiltered (field log v107: player paused in a background tab, ad on resume with
+    // "Untracked media playlist ... ADS NOT BLOCKED | tracked variant URLs: 0"). Worker-serialized.
     function pruneStreamInfos() {
         const now = Date.now();
+        let newestSeenAt = 0;
+        for (const channelName in StreamInfos) {
+            const seenAt = StreamInfos[channelName] && StreamInfos[channelName].LastSeenAt;
+            if (seenAt > newestSeenAt) {
+                newestSeenAt = seenAt;
+            }
+        }
+        // A stale stream can only be older than a stream seen within the window, so this means "another stream is in use"
+        const anotherStreamActive = newestSeenAt > 0 && (now - newestSeenAt) <= StreamInfoMaxAgeMs;
         for (const channelName in StreamInfos) {
             const streamInfo = StreamInfos[channelName];
-            if (!streamInfo || !streamInfo.LastSeenAt || (now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs) {
+            const malformed = !streamInfo || !streamInfo.LastSeenAt;
+            if (malformed || ((now - streamInfo.LastSeenAt) > StreamInfoMaxAgeMs && anotherStreamActive)) {
                 if (streamInfo && streamInfo.Urls) {
                     for (const url in streamInfo.Urls) {
                         delete StreamInfosByUrl[url];
@@ -341,6 +359,7 @@ twitch-videoad.js text/javascript
                     ${shiftMediaSequence.toString()}
                     ${describeRequestUrl.toString()}
                     ${noteUntrackedPlaylist.toString()}
+                    ${planUntrackedAdReload.toString()}
                     ${getStreamUrlForResolution.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
@@ -367,6 +386,7 @@ twitch-videoad.js text/javascript
                     FastAutoplayFirstTry = ${FastAutoplayFirstTry};
                     LowQualityFirst = ${LowQualityFirst};
                     AlignBackupSequence = ${AlignBackupSequence};
+                    UntrackedReload = ${UntrackedReload};
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
                     SoftReloadNoStrip = ${SoftReloadNoStrip};
@@ -1152,6 +1172,28 @@ twitch-videoad.js text/javascript
         entry.lastAdLogAt = now;
         return '[AD DEBUG] Untracked media playlist carries ads (NOT BLOCKED) — ' + described + ' | ad markers: ' + signifiers.join(', ');
     }
+    // Safety net for an untracked live playlist that carries ad markers (processM3U8 passes it through
+    // unfiltered, so the ad plays): ask for one player reload. The reload requests the master playlist
+    // again through hookWorkerFetch, which registers the stream, and ad blocking applies from then on.
+    // Limits: one reload per 30s and two per 10 minutes; after that one "giving up" line per 10 minutes.
+    // Returns null (nothing to do) or { reload, log }. Opt-out: twitchAdSolutions_untrackedReload=false.
+    // Worker-serialized.
+    function planUntrackedAdReload(textStr, now) {
+        if (!UntrackedReload || !textStr || !textStr.includes('#EXTINF')) return null;
+        if (textStr.includes('#EXT-X-ENDLIST') || textStr.includes('#EXT-X-PLAYLIST-TYPE:VOD')) return null;
+        if (!AdSignifiers.some((s) => s && textStr.includes(s))) return null;
+        while (UntrackedAdReloads.length > 0 && now - UntrackedAdReloads[0] > 600000) {
+            UntrackedAdReloads.shift();
+        }
+        if (UntrackedAdReloads.length > 0 && now - UntrackedAdReloads[UntrackedAdReloads.length - 1] < 30000) return null;
+        if (UntrackedAdReloads.length >= 2) {
+            if (now - UntrackedAdReloadGaveUpAt < 600000) return null;
+            UntrackedAdReloadGaveUpAt = now;
+            return { reload: false, log: '[AD DEBUG] Untracked playlist still carries ads after 2 player reloads in 10 minutes — giving up for now, ads are NOT blocked. Refresh the tab (F5) and report this log' };
+        }
+        UntrackedAdReloads.push(now);
+        return { reload: true, log: '[AD DEBUG] Untracked playlist carries ads — reloading the player so the stream is registered again (' + UntrackedAdReloads.length + '/2 in 10 minutes). Opt-out: twitchAdSolutions_untrackedReload=false' };
+    }
     // Ad watchdog: host + path of a request URL, without query/fragment (tokens live there), path cut to
     // 60 chars (segment paths are long opaque tokens). null for anything that is not an absolute URL.
     // Worker-serialized; also used on the main thread.
@@ -1227,6 +1269,13 @@ twitch-videoad.js text/javascript
             const untrackedLog = noteUntrackedPlaylist(url, textStr, Date.now());
             if (untrackedLog) {
                 console.log(untrackedLog);
+            }
+            const untrackedReload = planUntrackedAdReload(textStr, Date.now());
+            if (untrackedReload) {
+                console.log(untrackedReload.log);
+                if (untrackedReload.reload) {
+                    postMessage({ key: 'ReloadPlayer', kind: 'untracked-ads' });
+                }
             }
             return textStr;
         }
@@ -2979,6 +3028,12 @@ twitch-videoad.js text/javascript
     const iosSoftReload = isAppleTouchDevice && (function() {
         try { return localStorage.getItem('twitchAdSolutions_iosSoftReload') !== 'false'; } catch { return true; }
     })();
+    // Reload kinds that must replace a healthy, playing player with a new media player instance and a fresh
+    // access token: 'worker-recovery' (its worker is not hooked) and 'untracked-ads' (it plays a playlist
+    // vaft does not filter; the new instance requests the master playlist again, which registers the stream).
+    function isRecoveryReloadKind(reloadKind) {
+        return reloadKind === 'worker-recovery' || reloadKind === 'untracked-ads';
+    }
     // Pause/play or fully reload the Twitch player, preserving quality/volume settings
     function doTwitchPlayerTask(isPausePlay, isReload, reloadKind) {
         const playerAndState = getPlayerAndState();
@@ -3030,8 +3085,8 @@ twitch-videoad.js text/javascript
             console.log('[AD DEBUG] Downgraded reload to pause/play to preserve PiP');
             return;
         }
-        // 'worker-recovery' must replace a healthy player (its worker is the problem), so it skips this check.
-        if (isReload && reloadKind !== 'worker-recovery') {
+        // Recovery reloads must replace a healthy player (the player itself is the problem), so they skip this check.
+        if (isReload && !isRecoveryReloadKind(reloadKind)) {
             // Skip reload if the player is already healthy — avoids disrupting smooth playback.
             // But if we're way behind live edge (e.g. after a long ad break), proceed with reload to reset latency.
             const video = player.getHTMLVideoElement?.();
@@ -3096,16 +3151,17 @@ twitch-videoad.js text/javascript
             // Hard reload for 'early' (mid-break escape — fresh session gets new ad-decision bucket).
             // Soft reload for 'post-ad' (smooth transition, no black screen teardown).
             // Apple touch devices: force soft — a new media instance needs a user tap to resume (black-screen + play icon).
-            // 'worker-recovery' needs a new media player instance — that is what constructs a new (hooked) worker.
-            const hardReload = (reloadKind === 'early' || reloadKind === 'worker-recovery') && !iosSoftReload;
+            // Recovery reloads need a new media player instance: it constructs a new (hooked) worker and
+            // requests the master playlist again.
+            const hardReload = (reloadKind === 'early' || isRecoveryReloadKind(reloadKind)) && !iosSoftReload;
             // Decoupled from hardReload on purpose. The iOS downgrade below exists to keep the
             // media element user-gesture-blessed, which only requires skipping the new media
             // instance — not the token refresh. An 'early' reload after an autoplay commit
             // depends on refreshAccessToken to leave the autoplay-scoped 360p variant ladder;
             // without it an iOS user stays pinned at 360p, since 'early' is always downgraded
             // here and 'post-ad' is soft by definition, so nothing refreshes the token again.
-            const refreshToken = reloadKind === 'early' || reloadKind === 'worker-recovery';
-            if ((reloadKind === 'early' || reloadKind === 'worker-recovery') && iosSoftReload) {
+            const refreshToken = reloadKind === 'early' || isRecoveryReloadKind(reloadKind);
+            if ((reloadKind === 'early' || isRecoveryReloadKind(reloadKind)) && iosSoftReload) {
                 console.log('[AD DEBUG] iOS/iPadOS: downgrading hard reload to soft — keeps media element user-gesture-blessed (avoids black-screen + play-icon stall); access-token refresh is retained, so Source quality can still be restored. Opt-out: twitchAdSolutions_iosSoftReload=false');
             }
             console.log('[AD DEBUG] Reloading Twitch player' + (hardReload ? ' (hard)' : ' (soft)'));
@@ -3476,6 +3532,11 @@ twitch-videoad.js text/javascript
         if (lsLowQualityFirst === 'false') {
             LowQualityFirst = false;
             console.log('[AD DEBUG] LowQualityFirst disabled via localStorage — Source types probed before autoplay (360p)');
+        }
+        const lsUntrackedReload = localStorage.getItem('twitchAdSolutions_untrackedReload');
+        if (lsUntrackedReload === 'false') {
+            UntrackedReload = false;
+            console.log('[AD DEBUG] UntrackedReload disabled via localStorage — no player reload when an untracked playlist carries ads');
         }
         const lsAlignBackupSequence = localStorage.getItem('twitchAdSolutions_alignBackupSequence');
         if (lsAlignBackupSequence === 'false') {

@@ -45,6 +45,7 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.8.0 | **Backup sequence alignment** (`alignBackupSequence`). Backup playlists numbered differently from the live playlist froze the picture for 10–30 seconds at the start of a break; they are renumbered onto the live numbering now. |
 | 68.9.1 | **Your mute is kept.** A mute set with the player button, the volume slider or the `m` key is no longer undone by the player reload after an ad break. |
 | 68.10.x | **Ad watchdog.** If Twitch shows its ad label or countdown, vaft logs a short snapshot (`Ad watchdog —` lines in the console) of where the ad came from, even when it did not detect the ad itself. Playlists that bypass vaft's filter are logged as `Untracked media playlist`. Diagnostic only. |
+| 68.11.0 | **Paused players stay protected.** After 30 minutes of pause vaft forgot the stream, and the next ad after resuming played unblocked. The stream now stays registered, and if vaft ever meets an ad in a playlist it does not know (`untrackedReload`), it reloads the player once so blocking applies again. |
 
 Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
 
@@ -98,6 +99,7 @@ Advanced settings (vaft):
 |---|---|---|
 | `twitchAdSolutions_alignBackupSequence` | `true` | Renumber backup playlists onto the live numbering at the switch. *Fork.* |
 | `twitchAdSolutions_unhookedPageReload` | `true` | Allow the one-time page reload when vaft missed Twitch's video worker. *Fork.* |
+| `twitchAdSolutions_untrackedReload` | `true` | Reload the player (at most twice per 10 minutes) when an ad shows up in a playlist vaft does not track. *Fork.* |
 | `twitchAdSolutions_backupSwapFirst` | `true` | Swap to a backup stream on ad detect. `false` strips ad segments from the live stream instead (legacy). |
 | `twitchAdSolutions_fastAutoplayFirstTry` | `true` | After a break that needed 360p, try 360p first on the next break. |
 | `twitchAdSolutions_pinBackupPlayerType` | `true` | Remember which backup type worked last (360p is never pinned). |

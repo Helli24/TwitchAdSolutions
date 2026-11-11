@@ -413,8 +413,125 @@ function mainTests(format) {
     // Fork: reload kinds that replace a healthy player (68.11.0)
     section('isRecoveryReloadKind');
     const kinds = format.loadMain(['isRecoveryReloadKind'], {});
-    assert(kinds.isRecoveryReloadKind('worker-recovery') && kinds.isRecoveryReloadKind('untracked-ads'), 'worker-recovery and untracked-ads replace a healthy player');
-    assert(!kinds.isRecoveryReloadKind('early') && !kinds.isRecoveryReloadKind('post-ad') && !kinds.isRecoveryReloadKind(undefined), 'early, post-ad and plain reloads keep the healthy-player check');
+    assert(kinds.isRecoveryReloadKind('worker-recovery') && kinds.isRecoveryReloadKind('untracked-ads') && kinds.isRecoveryReloadKind('error-recovery'), 'worker-recovery, untracked-ads and error-recovery replace the player unconditionally');
+    assert(!kinds.isRecoveryReloadKind('early') && !kinds.isRecoveryReloadKind('post-ad') && !kinds.isRecoveryReloadKind('codec-swap') && !kinds.isRecoveryReloadKind(undefined), 'early, post-ad, codec-swap and plain reloads keep the healthy-player check');
+
+    // Fork: player error recovery (68.12.0). Field log: soft codec-swap reload at 12:15:51.017, player error
+    // 6 ms later, Twitch shows "(Error #4000)", the 'early' reload 390 ms later is dropped (player paused).
+    section('player error recovery');
+    const makeErrorCtx = () => {
+        const logs = [];
+        const tasks = [];
+        const dom = { playerText: '' };
+        const ctx = format.loadMain(
+            ['PlayerErrorPattern', 'playerErrorState', 'findPlayerErrorCode', 'planPlayerErrorRecovery', 'checkPlayerErrorRecovery'],
+            {
+                console: { log: (m) => logs.push(String(m)) },
+                document: { querySelector: (selector) => selector === '[data-a-target="video-player"]' ? { textContent: dom.playerText } : null },
+                playerBufferState: { lastReloadAt: 0, lastReloadDesc: '', inAdBreak: false },
+                doTwitchPlayerTask: (...args) => tasks.push(args)
+            });
+        return { ctx, logs, tasks, dom };
+    };
+    let pe = makeErrorCtx();
+    const errorText = 'This video is either unavailable or not supported in this browser. (Error #4000)';
+    assertEq(pe.ctx.findPlayerErrorCode(), null, 'no error overlay: no code');
+    pe.dom.playerText = 'LIVE 1,353 viewers';
+    assertEq(pe.ctx.findPlayerErrorCode(), null, 'ordinary player text is not an error');
+    pe.dom.playerText = errorText;
+    assertEq(pe.ctx.findPlayerErrorCode(), '4000', 'reads the code from Twitch\'s error overlay');
+    pe.dom.playerText = 'Beim Abspielen ist ein Fehler aufgetreten. (Fehler #2000)';
+    assertEq(pe.ctx.findPlayerErrorCode(), '2000', 'German UI text');
+    pe.dom.playerText = 'This content is not available. (Error #5000)';
+    assertEq(pe.ctx.findPlayerErrorCode(), null, 'errors a reload cannot fix (#5000) are ignored');
+
+    const p0 = 5000000;
+    assertEq(pe.ctx.planPlayerErrorRecovery('4000', p0, 5000, Infinity, false), null, 'an error unrelated to vaft (no recent reload, no ad break) is left alone');
+    assertEq(pe.ctx.planPlayerErrorRecovery('4000', p0, 500, 600, true), null, 'waits until the error has been up for 2s');
+    const firstRecovery = pe.ctx.planPlayerErrorRecovery('4000', p0, 2500, 2500, false);
+    assert(firstRecovery && firstRecovery.reload === true && firstRecovery.log.includes('#4000') && firstRecovery.log.includes('(1/2'), 'error after a vaft reload: replace the player');
+    assertEq(pe.ctx.planPlayerErrorRecovery('4000', p0 + 5000, 7500, 5000, false), null, 'no second attempt within 15s');
+    const secondRecovery = pe.ctx.planPlayerErrorRecovery('4000', p0 + 16000, 3000, 16000, true);
+    assert(secondRecovery && secondRecovery.reload === true && secondRecovery.log.includes('(2/2'), 'a second attempt is allowed after 15s');
+    const errorGaveUp = pe.ctx.planPlayerErrorRecovery('4000', p0 + 40000, 3000, 24000, true);
+    assert(errorGaveUp && errorGaveUp.reload === false && errorGaveUp.log.includes('giving up'), 'after two attempts in 10 minutes it gives up and says so');
+    assertEq(pe.ctx.planPlayerErrorRecovery('4000', p0 + 60000, 3000, 44000, true), null, 'the giving-up line is logged once');
+    const errorAfterWindow = pe.ctx.planPlayerErrorRecovery('3000', p0 + 16000 + 600001, 3000, 100, true);
+    assert(errorAfterWindow && errorAfterWindow.reload === true && errorAfterWindow.log.includes('(1/2'), 'the budget is back after 10 minutes');
+    pe.ctx.playerErrorState.recoveries.length = 0;
+    assert(pe.ctx.planPlayerErrorRecovery('4000', p0, 3000, Infinity, true) !== null, 'an error during an ad break is recovered even without a recent reload');
+    pe.ctx.playerErrorState.recoveries.length = 0;
+    pe.ctx.playerErrorState.enabled = false;
+    assertEq(pe.ctx.planPlayerErrorRecovery('4000', p0, 3000, 100, true), null, 'opt-out disables the recovery');
+
+    // The whole check, as the buffer monitor runs it
+    pe = makeErrorCtx();
+    pe.ctx.playerBufferState.lastReloadAt = Date.now() - 400;
+    pe.ctx.playerBufferState.lastReloadDesc = 'soft, codec-swap';
+    pe.ctx.playerBufferState.inAdBreak = true;
+    pe.ctx.checkPlayerErrorRecovery();
+    assertEq(pe.logs.length, 0, 'no error overlay: nothing logged');
+    pe.dom.playerText = errorText;
+    pe.ctx.checkPlayerErrorRecovery();
+    assert(pe.logs.length === 1 && pe.logs[0].includes('Player error #4000 shown') && pe.logs[0].includes('(soft, codec-swap)') && pe.logs[0].includes('ad break: yes'), 'first sighting logs the error with the last reload and the break state');
+    assertEq(pe.tasks.length, 0, 'no reload on the first sighting');
+    pe.ctx.checkPlayerErrorRecovery();
+    assertEq(pe.logs.length, 1, 'the sighting is logged once');
+    pe.ctx.playerErrorState.firstSeenAt = Date.now() - 2100;
+    pe.ctx.checkPlayerErrorRecovery();
+    assertDeepEq(pe.tasks, [[false, true, 'error-recovery']], 'after 2s the player is replaced with an error-recovery reload');
+    pe.ctx.checkPlayerErrorRecovery();
+    assertEq(pe.tasks.length, 1, 'no second reload on the next tick');
+    pe.dom.playerText = 'LIVE';
+    pe.ctx.checkPlayerErrorRecovery();
+    assert(pe.ctx.playerErrorState.firstSeenAt === 0 && pe.ctx.playerErrorState.logged === false, 'state resets once the error is gone');
+    pe = makeErrorCtx();
+    pe.dom.playerText = errorText;
+    pe.ctx.checkPlayerErrorRecovery();
+    pe.ctx.playerErrorState.firstSeenAt = Date.now() - 5000;
+    pe.ctx.checkPlayerErrorRecovery();
+    assert(pe.logs.length === 1 && pe.logs[0].includes('last vaft reload: none') && pe.tasks.length === 0, 'an error without any vaft involvement is logged but not touched');
+
+    // The real doTwitchPlayerTask with a mocked Twitch player: reload routing for the fork's kinds
+    section('doTwitchPlayerTask reload routing');
+    const makeReloadCtx = (paused) => {
+        const logs = [];
+        const srcCalls = [];
+        const posted = [];
+        const video = { muted: false, readyState: paused ? 0 : 4, paused: paused, ended: false, isConnected: true };
+        const player = { isPaused: () => paused, core: { paused: paused, state: {} }, pause() {}, play() { return Promise.resolve(); }, getHTMLVideoElement: () => video };
+        const ctx = format.loadMain(['isRecoveryReloadKind', 'doTwitchPlayerTask'], {
+            console: { log: (m) => logs.push(String(m)) },
+            getPlayerAndState: () => ({ player, state: { setSrc: (options) => srcCalls.push(options) } }),
+            playerBufferState: { userPauseIntent: false, weJustPaused: 0, lastReloadAt: 0, lastReloadDesc: '' },
+            document: { pictureInPictureElement: null, addEventListener() {}, removeEventListener() {}, getElementsByTagName: () => [] },
+            localStorage: { getItem: () => null, setItem() {} },
+            getPlayerVideoElement: () => video,
+            postTwitchWorkerMessage: (key) => posted.push(key),
+            iosSoftReload: false,
+            RecoverFromSilentMute: true,
+            setTimeout: () => 1
+        });
+        return { ctx, logs, srcCalls, posted };
+    };
+    let rl = makeReloadCtx(true);// player stopped with an error: reports paused, readyState 0
+    rl.ctx.doTwitchPlayerTask(false, true, 'early');
+    assertEq(rl.srcCalls.length, 0, 'an early reload for a paused player is dropped (as before)');
+    assert(rl.logs.join('|').includes('Reload request (early) ignored — player is paused'), 'and the drop is logged now');
+    rl.ctx.doTwitchPlayerTask(false, true, 'early');
+    assertEq(rl.logs.length, 1, 'the drop log is rate-limited');
+    rl.ctx.doTwitchPlayerTask(false, true, 'error-recovery');
+    assertDeepEq(rl.srcCalls, [{ isNewMediaPlayerInstance: true, refreshAccessToken: true }], 'error-recovery replaces a paused/errored player: new media player instance and new token');
+    assertDeepEq(rl.posted, ['TriggeredPlayerReload'], 'and tells the worker about the reload');
+    assert(rl.logs.join('|').includes('Reloading Twitch player (hard) — error-recovery'), 'the reload log names the kind');
+    assertEq(rl.ctx.playerBufferState.lastReloadDesc, 'hard, error-recovery', 'the reload is remembered for the error diagnostic');
+    rl = makeReloadCtx(false);
+    rl.ctx.doTwitchPlayerTask(false, true, 'codec-swap');
+    assertDeepEq(rl.srcCalls, [{ isNewMediaPlayerInstance: false, refreshAccessToken: false }], 'codec-swap stays a soft reload without token refresh (upstream behaviour)');
+    assert(rl.logs.join('|').includes('Reloading Twitch player (soft) — codec-swap'), 'and is named in the log');
+    rl = makeReloadCtx(false);
+    rl.ctx.doTwitchPlayerTask(false, true);
+    assert(rl.logs.join('|').endsWith('Reloading Twitch player (soft)'), 'a reload without a kind logs as before');
 
     // Fork: user mute intent (68.9.1, input filter 68.10.3)
     section('trackUserMuteIntent');

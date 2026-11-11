@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 108;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 109;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -1417,8 +1417,12 @@ twitch-videoad.js text/javascript
             if (((isEnhanced && !SkipPlayerReloadOnHevc) || AlwaysReloadPlayerOnAd) && streamInfo.ModifiedM3U8 && !streamInfo.IsUsingModifiedM3U8 && !recentlyReloaded) {
                 streamInfo.IsUsingModifiedM3U8 = true;
                 streamInfo.LastPlayerReload = Date.now();
+                // Fork diagnostic: this reload had no log line of its own. 'codec-swap' is routed like a
+                // reload without a kind (soft); the kind only names it in the main-thread log.
+                console.log('[AD DEBUG] Current variant uses an enhanced codec (' + currentCodecFamily + ', ' + (currentResolution.Resolution || 'unknown resolution') + ') — reloading the player onto the AVC variant list');
                 postMessage({
-                    key: 'ReloadPlayer'
+                    key: 'ReloadPlayer',
+                    kind: 'codec-swap'
                 });
             }
             // Sticky CSAI fast path: if a prior poll in THIS break already confirmed the break
@@ -2183,7 +2187,9 @@ twitch-videoad.js text/javascript
         vaftEverUnmuted: false,
         userMuteIntent: false,// set when the player <video> is muted within 1.5s of input aimed at the player (the user's own mute)
         lastUserInputAt: 0,
-        lastOwnMuteAt: 0// vaft's own pre-mute on a hard reload, so trackUserMuteIntent does not take it for the user's
+        lastOwnMuteAt: 0,// vaft's own pre-mute on a hard reload, so trackUserMuteIntent does not take it for the user's
+        lastReloadDesc: '',// 'hard|soft, <kind>' of the last reload, for the player error diagnostic
+        lastDroppedReloadLogAt: 0
     };
     // Poll the player state to detect and fix buffering caused by ad stream switching
     // Switch playback diagnostic. Samples the player's <video> every 250ms for 20s after an ad-start
@@ -2429,6 +2435,75 @@ twitch-videoad.js text/javascript
         const list = Array.isArray(entries) ? summarizeRecentRequests(entries, Date.now(), 30000, 20) : [];
         console.log('[AD DEBUG] Ad watchdog — worker requests (last 30s): ' + (list.join(' | ') || 'none'));
     }
+    // Player error recovery. Field log (v108, HEVC stream): the soft reload that moves the player onto the
+    // AVC variant list at ad start failed inside the player 6 ms later ("Player stopping playback - error
+    // Player:2 (ErrorNotSupported code 0 - No playable format)"), Twitch showed "(Error #4000)", and the hard
+    // 'early' reload the worker asked for 390 ms later was dropped because the player was paused. Nothing
+    // acts on a paused player, so it stayed dead until the user reloaded the page.
+    // When Twitch's error overlay (#1000/#2000/#3000/#4000) has been up for 2s and vaft itself reloaded the
+    // player in the last 60s or is blocking an ad break, replace the player once (hard reload, new access
+    // token). Limits: 15s between attempts, two per 10 minutes, then one "giving up" line per 10 minutes.
+    // Errors that have nothing to do with vaft are logged but left alone.
+    // Opt-out: twitchAdSolutions_errorRecovery=false.
+    const PlayerErrorPattern = /(?:Error|Fehler)\s*#([1-4]000)\b/;
+    const playerErrorState = {
+        enabled: true,
+        firstSeenAt: 0,
+        logged: false,
+        recoveries: [],// timestamps of the recovery reloads of the last 10 minutes
+        gaveUpAt: 0
+    };
+    function findPlayerErrorCode() {
+        const root = document.querySelector('[data-a-target="video-player"]') || document.querySelector('.video-player');
+        const match = root ? PlayerErrorPattern.exec(root.textContent || '') : null;
+        return match ? match[1] : null;
+    }
+    // Decision only (no side effects besides its own bookkeeping): null, or { reload, log }
+    function planPlayerErrorRecovery(code, now, errorVisibleMs, sinceVaftReloadMs, inAdBreak) {
+        if (!playerErrorState.enabled || !code) return null;
+        if (!(sinceVaftReloadMs <= 60000) && !inAdBreak) return null;
+        if (errorVisibleMs < 2000) return null;
+        const recoveries = playerErrorState.recoveries;
+        while (recoveries.length > 0 && now - recoveries[0] > 600000) {
+            recoveries.shift();
+        }
+        if (recoveries.length > 0 && now - recoveries[recoveries.length - 1] < 15000) return null;
+        if (recoveries.length >= 2) {
+            if (now - playerErrorState.gaveUpAt < 600000) return null;
+            playerErrorState.gaveUpAt = now;
+            return { reload: false, log: '[AD DEBUG] Player error #' + code + ' is still there after 2 recovery reloads in 10 minutes — giving up for now. Refresh the tab (F5) and report this log' };
+        }
+        recoveries.push(now);
+        return { reload: true, log: '[AD DEBUG] Player error #' + code + ' after a vaft reload or during an ad break — replacing the player (' + recoveries.length + '/2 in 10 minutes). Opt-out: twitchAdSolutions_errorRecovery=false' };
+    }
+    function checkPlayerErrorRecovery() {
+        try {
+            const code = findPlayerErrorCode();
+            if (!code) {
+                playerErrorState.firstSeenAt = 0;
+                playerErrorState.logged = false;
+                return;
+            }
+            const now = Date.now();
+            if (!playerErrorState.firstSeenAt) playerErrorState.firstSeenAt = now;
+            const sinceReloadMs = playerBufferState.lastReloadAt ? now - playerBufferState.lastReloadAt : Infinity;
+            if (!playerErrorState.logged) {
+                playerErrorState.logged = true;
+                console.log('[AD DEBUG] Player error #' + code + ' shown — last vaft reload: ' +
+                    (playerBufferState.lastReloadAt ? (sinceReloadMs / 1000).toFixed(1) + 's ago (' + (playerBufferState.lastReloadDesc || 'unknown') + ')' : 'none') +
+                    ', ad break: ' + (playerBufferState.inAdBreak ? 'yes' : 'no'));
+            }
+            const plan = planPlayerErrorRecovery(code, now, now - playerErrorState.firstSeenAt, sinceReloadMs, playerBufferState.inAdBreak === true);
+            if (plan) {
+                console.log(plan.log);
+                if (plan.reload) {
+                    doTwitchPlayerTask(false, true, 'error-recovery');
+                }
+            }
+        } catch (err) {
+            console.log('[AD DEBUG] Player error check failed: ' + err.message);
+        }
+    }
     // Unhooked-worker recovery. The userscript manager can inject vaft after Twitch has already
     // constructed its player worker (document-start is not guaranteed). That worker never runs
     // hookWorkerFetch, so no ad break is ever detected and SSAI ads play unblocked for the whole
@@ -2522,6 +2597,7 @@ twitch-videoad.js text/javascript
                 };
                 checkUnhookedPlayerWorker(playerAndState.player);
                 checkAdWatchdog(playerAndState.player);
+                checkPlayerErrorRecovery();
                 const video = playerAndState.player.getHTMLVideoElement?.();
                 if (video && !video.__tasIntentHooked) {
                     video.__tasIntentHooked = true;
@@ -3028,11 +3104,12 @@ twitch-videoad.js text/javascript
     const iosSoftReload = isAppleTouchDevice && (function() {
         try { return localStorage.getItem('twitchAdSolutions_iosSoftReload') !== 'false'; } catch { return true; }
     })();
-    // Reload kinds that must replace a healthy, playing player with a new media player instance and a fresh
-    // access token: 'worker-recovery' (its worker is not hooked) and 'untracked-ads' (it plays a playlist
-    // vaft does not filter; the new instance requests the master playlist again, which registers the stream).
+    // Reload kinds that replace the player with a new media player instance and a fresh access token
+    // without asking whether it is healthy: 'worker-recovery' (its worker is not hooked), 'untracked-ads'
+    // (it plays a playlist vaft does not filter; the new instance requests the master playlist again, which
+    // registers the stream) and 'error-recovery' (it shows Twitch's error overlay after a vaft reload).
     function isRecoveryReloadKind(reloadKind) {
-        return reloadKind === 'worker-recovery' || reloadKind === 'untracked-ads';
+        return reloadKind === 'worker-recovery' || reloadKind === 'untracked-ads' || reloadKind === 'error-recovery';
     }
     // Pause/play or fully reload the Twitch player, preserving quality/volume settings
     function doTwitchPlayerTask(isPausePlay, isReload, reloadKind) {
@@ -3052,7 +3129,8 @@ twitch-videoad.js text/javascript
             return;
         }
         const wasPaused = player.isPaused() || player.core?.paused;
-        if (wasPaused) {
+        // A player that stopped with an error counts as paused; 'error-recovery' exists to replace exactly that one.
+        if (wasPaused && !(isReload && reloadKind === 'error-recovery')) {
             // User deliberately paused — respect their intent, don't auto-resume
             if (playerBufferState.userPauseIntent) {
                 if (!playerBufferState.loggedPauseIntent) {
@@ -3064,6 +3142,12 @@ twitch-videoad.js text/javascript
             // If WE recently called pause/play and player is still paused, retry play (stuck from autoplay policy or ad-state interference)
             if (playerBufferState.weJustPaused && (Date.now() - playerBufferState.weJustPaused) < 10000) {
                 try { player.play()?.catch?.(() => {}); } catch {}
+            }
+            // Fork diagnostic: a reload request that arrives while the player is paused is dropped here,
+            // which used to be silent (field log: the 'early' reload right after a failed soft reload).
+            if (isReload && Date.now() - (playerBufferState.lastDroppedReloadLogAt || 0) > 5000) {
+                playerBufferState.lastDroppedReloadLogAt = Date.now();
+                console.log('[AD DEBUG] Reload request (' + (reloadKind || 'no kind') + ') ignored — player is paused');
             }
             return;
         }
@@ -3164,7 +3248,8 @@ twitch-videoad.js text/javascript
             if ((reloadKind === 'early' || isRecoveryReloadKind(reloadKind)) && iosSoftReload) {
                 console.log('[AD DEBUG] iOS/iPadOS: downgrading hard reload to soft — keeps media element user-gesture-blessed (avoids black-screen + play-icon stall); access-token refresh is retained, so Source quality can still be restored. Opt-out: twitchAdSolutions_iosSoftReload=false');
             }
-            console.log('[AD DEBUG] Reloading Twitch player' + (hardReload ? ' (hard)' : ' (soft)'));
+            playerBufferState.lastReloadDesc = (hardReload ? 'hard' : 'soft') + ', ' + (reloadKind || 'no kind');
+            console.log('[AD DEBUG] Reloading Twitch player' + (hardReload ? ' (hard)' : ' (soft)') + (reloadKind ? ' — ' + reloadKind : ''));
             // Pre-mute through hard reload to hide MSE-teardown audio click; restored on
             // `canplay` with 1500ms safety cap. Skipped if user already muted.
             if (hardReload) {
@@ -3532,6 +3617,10 @@ twitch-videoad.js text/javascript
         if (lsLowQualityFirst === 'false') {
             LowQualityFirst = false;
             console.log('[AD DEBUG] LowQualityFirst disabled via localStorage — Source types probed before autoplay (360p)');
+        }
+        if (localStorage.getItem('twitchAdSolutions_errorRecovery') === 'false') {
+            playerErrorState.enabled = false;
+            console.log('[AD DEBUG] Player error recovery disabled via localStorage — no reload when Twitch shows an error after a vaft reload');
         }
         const lsUntrackedReload = localStorage.getItem('twitchAdSolutions_untrackedReload');
         if (lsUntrackedReload === 'false') {

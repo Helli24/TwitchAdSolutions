@@ -1,5 +1,23 @@
 ## Unreleased
 
+## v68.12.0 (2026-11-11)
+
+### Added
+- **Player error recovery** — field log (v108, 1440p HEVC stream): at ad start the worker moved the player onto the AVC variant list with a soft reload (`Reloading Twitch player (soft)` at 12:15:51.017). 6 ms later the player itself failed: `Player stopping playback - error Player:2 (ErrorNotSupported code 0 - No playable format)`, and Twitch showed `This video is either unavailable or not supported in this browser. (Error #4000)`. The hard `early` reload the worker requested 390 ms later was dropped without a log because the player was paused, and nothing else acts on a paused player, so it stayed dead until the page was reloaded. `checkPlayerErrorRecovery()` (buffer monitor) now watches for Twitch's error overlay (`#1000`/`#2000`/`#3000`/`#4000`). If it has been up for 2 s and vaft reloaded the player in the last 60 s or is blocking an ad break, it replaces the player once with a hard reload and a new access token (`ReloadPlayer` kind `error-recovery`, which is allowed to act on a paused player). Limits: 15 s between attempts, two per 10 minutes, then one `giving up` line. Errors unrelated to vaft are logged and left alone. Opt-out: `twitchAdSolutions_errorRecovery='false'`. vaft only
+
+### Debug Logging
+- The codec reload at ad start had no log line of its own. The worker now logs `Current variant uses an enhanced codec (hevc, 2560x1440) — reloading the player onto the AVC variant list` and sends the reload as kind `codec-swap` (still a soft reload, as upstream).
+- `Reloading Twitch player (hard|soft)` is followed by the kind (`— early`, `— codec-swap`, `— error-recovery`, …).
+- `Player error #4000 shown — last vaft reload: 0.4s ago (soft, codec-swap), ad break: yes` on the first sighting of an error overlay.
+- `Reload request (early) ignored — player is paused` when a reload request is dropped (rate-limited to one per 5 s).
+
+### Not changed
+- The cause of `No playable format` on the soft codec reload is not known yet (the placeholder segments were ruled out: the error came 380 ms before any was delivered). The reload stays soft; the new log lines show whether it fails every time on HEVC/AV1 streams.
+- ryanbr/TwitchAdSolutions is still at v68.5.7; nothing to port.
+
+### Tests
+- 437 checks: error overlay detection, the recovery plan (limits, giving up, opt-out, unrelated errors), the check as the buffer monitor runs it, and the real `doTwitchPlayerTask` with a mocked player (dropped `early` reload on a paused player, `error-recovery` replacing it, `codec-swap` staying soft).
+
 ## v68.11.0 (2026-11-10)
 
 ### Fixed

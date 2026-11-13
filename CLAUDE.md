@@ -34,7 +34,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.12.0/109, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.12.1/110, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
 
 ## localStorage Config
 
@@ -69,7 +69,7 @@ All read at init, injected into worker blob:
 
 ## Key Architecture (vaft)
 
-- **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload.
+- **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload. Scheduling only through `scheduleMonitorTick(delay)`, which replaces the single pending tick (never call `setTimeout(monitorPlayerBuffering, …)` or `monitorPlayerBuffering()` from elsewhere: upstream that started an extra chain on every tab return, ryanbr#267). Each tick schedules its successor first (survives exceptions) and replaces it with the visibility-aware delay at the end; `hookMonitorVisibility()` moves the pending tick to 100ms when the tab becomes visible.
 - **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ reloads in 5 minutes.
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.

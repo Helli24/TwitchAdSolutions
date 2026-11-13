@@ -1,5 +1,13 @@
 ## Unreleased
 
+## v68.12.1 (2026-11-13)
+
+### Fixed
+- **One more buffer-monitor polling chain on every return to the tab** — reported upstream in [ryanbr/TwitchAdSolutions#267](https://github.com/ryanbr/TwitchAdSolutions/issues/267) by MATTEO12SA. `monitorPlayerBuffering()` scheduled its next tick at the end of every tick, and the `visibilitychange` handler ran an extra tick 100 ms after the tab became visible, which scheduled its own next tick as well. Every tab return therefore started another chain that never ended (the report measured 110 ticks per 6 s after 10 returns instead of 10). Each chain repeats the full tick (React tree walk, overlay check, the fork's worker/watchdog/error checks), and ticks of parallel chains run milliseconds apart, so the playhead looks frozen between them and the stall counter can reach its threshold far too early (possible needless pause/play on a thin live-edge buffer). New `scheduleMonitorTick()` keeps exactly one tick pending by replacing it; the tab-return handler (`hookMonitorVisibility()`) moves the pending tick to 100 ms instead of adding one. Each tick also schedules its successor first, so an exception inside a tick no longer ends the monitor for the rest of the page session (before, it did). vaft only
+
+### Tests
+- 453 checks: the real `monitorPlayerBuffering` with fake timers — one chain, still one pending tick and 10 ticks per 6 s after 10 tab returns, the 100 ms tick on return, the 3× delay in a hidden tab, and a chain that survives an exception. With the upstream scheduling the same simulation showed 6 parallel chains.
+
 ## v68.12.0 (2026-11-11)
 
 ### Added

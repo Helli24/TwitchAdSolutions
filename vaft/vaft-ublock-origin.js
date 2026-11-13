@@ -2914,7 +2914,7 @@ twitch-videoad.js text/javascript
         // even after hasAds has transitioned to false. updateAdblockBanner only calls
         // hideTwitchAdOverlays during the active ad break; some overlays have their own
         // lifecycle and stay visible afterwards. Running here on every monitor tick
-        // (1-3s cadence) keeps them hidden without a dedicated interval.
+        // (0.6s, 1.8s in a hidden tab) keeps them hidden without a dedicated interval.
         try { hideTwitchAdOverlays(); } catch {}
         // Visibility-aware backoff: poll 3x slower when tab is hidden (but NOT during PiP — user is still watching).
         // Exception: don't back off during an active ad break — hidden-tab recovery (backup search → reload) is

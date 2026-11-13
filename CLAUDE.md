@@ -16,9 +16,7 @@ Functions serialized via `.toString()` into the Web Worker blob CANNOT reference
 
 Synced pairs (same logic, different format):
 - `vaft/vaft.user.js` + `vaft/vaft-ublock-origin.js`
-- `vaft/vaft_testing.user.js` + `vaft/vaft-testing-ublock-origin.js`
 - `video-swap-new/video-swap-new.user.js` + `video-swap-new/video-swap-new-ublock-origin.js`
-- `video-swap-new/video-swap-new-ublock-origin-testing.js` (testing only)
 - `strip/strip.user.js` (standalone)
 
 uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS — uBlock resource header).
@@ -34,7 +32,7 @@ uBlock files have `twitch-videoad.js text/javascript` as line 1 (not valid JS �
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.12.1/110, video-swap-new 1.87/55, strip 1.10/27. Testing: vaft 678.0.0/678, video-swap-new -/621.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. Current: vaft 68.12.1/110, video-swap-new 1.87/55, strip 1.10/27.
 
 ## localStorage Config
 
@@ -56,10 +54,7 @@ All read at init, injected into worker blob:
 - `twitchAdSolutions_fastAutoplayFirstTry` — opt-out (default `true` as of v67.1.0). Prepend autoplay (360p) to position 0 of the iteration when the prior break committed autoplay via PreferLowQualityBackup escape hatch. Saves ~1.5-2s of probe-loop buffering. Auto-resets when a Source-tier type wins (channel recovered) so quality returns to full automatically. Set to `'false'` to force full Source-tier probe on every break (vaft only)
 - `twitchAdSolutions_recoverFromSilentMute` — opt-out (default `true`). On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, recover via the 5500ms backstop (Twitch's silent re-mute pattern — issue #200). Disable via `'false'` if you deliberately mute mid-session and want that preserved across reloads. Users muted from session start are always respected (vaftEverUnmuted=false short-circuits the recovery check). vaft only.
 - `twitchAdSolutions_disableAdSpoofing` — opt-in via `'false'` (default `'true'` — spoofing is OFF). When enabled, on ad detect vaft fires the GQL ad-tracking beacons (`video_ad_impression`, `video_ad_quartile_complete` × 4, `video_ad_pod_complete`) that Twitch's player would have sent if the ad had played normally. Originally intended to mimic the ad-completion signal Twitch expects and may reduce detection escalation — but the always-100%-watched + audible + visible beacon pattern may itself fingerprint as anomalous (silently, without GQL rejection) and trigger detection escalation in the other direction (observed correlation with CSAI ads reaching committed backups + TTV-AB maintainer hypothesis). Default flipped from on→off after v68.2.0. Set to `'false'` to re-enable (for A/B testing whether spoofing affects ad break duration / CSAI escalation on your channels). Failures swallowed (never blocks ad-block flow). vaft only.
-- `twitchAdSolutions_disableInAdGapSeek` — opt-out via `'true'` (default off = feature on). Disables the in-ad frozen-buffer-gap seek (v660, TTV-AB #33 mirror) for A/B isolation of mid-break pause/loading-circle reports. vaft testing only.
-- `twitchAdSolutions_disableInAdFreezeReload` — opt-out via `'true'` (default off = feature on). Disables the in-ad frozen-playhead reload escalation (v662, audio-gap CSAI backstop) for A/B isolation. vaft testing only.
 - `twitchAdSolutions_disablePostBreakWedge` — opt-out via `'true'` (default off = feature on). Disables the post-break video-wedge recovery (v667/v68.5.0, TTV-AB _checkPostBreakWedge mirror) for A/B isolation.
-- `twitchAdSolutions_disableBackgroundResume` — opt-out via `'true'` (default off = feature on). Disables the hidden-tab resume guard (v672, issue #255): a Twitch-initiated pause while the tab is hidden is resumed with a retry chain (strike-capped so a deliberate media-key pause is respected) instead of staying paused until tab focus. vaft testing only.
 
 ## CSAI vs SSAI
 
@@ -69,7 +64,7 @@ All read at init, injected into worker blob:
 
 ## Key Architecture (vaft)
 
-- **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload. Scheduling only through `scheduleMonitorTick(delay)`, which replaces the single pending tick (never call `setTimeout(monitorPlayerBuffering, …)` or `monitorPlayerBuffering()` from elsewhere: upstream that started an extra chain on every tab return, ryanbr#267). Each tick schedules its successor first (survives exceptions) and replaces it with the visibility-aware delay at the end; `hookMonitorVisibility()` moves the pending tick to 100ms when the tab becomes visible.
+- **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 0.6s (`PlayerBufferingDelay`), 1.8s in a hidden tab outside an ad break and PiP. Detects stalls, fires pause/play or reload. Scheduling only through `scheduleMonitorTick(delay)`, which replaces the single pending tick (never call `setTimeout(monitorPlayerBuffering, …)` or `monitorPlayerBuffering()` from elsewhere: upstream that started an extra chain on every tab return, ryanbr#267). Each tick schedules its successor first (survives exceptions) and replaces it with the visibility-aware delay at the end; `hookMonitorVisibility()` moves the pending tick to 100ms when the tab becomes visible.
 - **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ reloads in 5 minutes.
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.
@@ -101,14 +96,10 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 
 `npm ci` once, then:
 - `npm test` — unit tests. `tests/scripts.js` parses `vaft/vaft.user.js` and `vaft/vaft-ublock-origin.js` with acorn, extracts declarations from the IIFE body by name and evaluates them in a `vm` context (worker functions after `declareOptions(globalThis)`, like the blob; main-thread functions with mocked globals). Every suite runs against both formats. Never copy script functions into tests; add the name to the `loadWorker`/`loadMain` call instead. New fork logic should live in a named function so it can be tested this way.
-- `npm run syntax` — `tests/syntax.js` parses all ten shipped scripts with acorn (uBlock files without their header line). Add new script files to its lists.
+- `npm run syntax` — `tests/syntax.js` parses all seven shipped scripts with acorn (uBlock files without their header line). Add new script files to its lists.
 - `npm test` also compares the code tokens of `vaft.user.js` and `vaft-ublock-origin.js` (`findPairDifferences()` in `tests/scripts.js`): a change made to only one of the two fails. Known upstream differences (host check line, comments, two log strings) are listed there.
 
 GitHub Actions (`validate.yml`) runs both on every push/PR touching `.js` or `package*.json`; the release workflow runs them before tagging. `tests/benchmark.js` still uses copied historical implementations and is not part of CI.
-
-## Testing
-
-Testing files include experimental features (ad completion spoofing, lower thresholds, removed pruneStreamInfos). Don't apply to main scripts without explicit request. Testing-script-only changes commit directly to master; PRs are for release scripts.
 
 ## Backup Player Types
 

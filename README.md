@@ -47,6 +47,7 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.10.x | **Ad watchdog.** If Twitch shows its ad label or countdown, vaft logs a short snapshot (`Ad watchdog —` lines in the console) of where the ad came from, even when it did not detect the ad itself. Playlists that bypass vaft's filter are logged as `Untracked media playlist`. Diagnostic only. |
 | 68.11.0 | **Paused players stay protected.** After 30 minutes of pause vaft forgot the stream, and the next ad after resuming played unblocked. The stream now stays registered, and if vaft ever meets an ad in a playlist it does not know (`untrackedReload`), it reloads the player once so blocking applies again. |
 | 68.12.0 | **Player error recovery** (`errorRecovery`). If the player stops with Twitch's error screen (for example Error #4000 on 1440p/HEVC streams at the start of an ad break) right after vaft reloaded it or during an ad break, vaft replaces the player once instead of leaving it dead. |
+| 68.12.1 | **No extra background work after tab switches.** Every return to the Twitch tab started another copy of vaft's player check that never stopped ([reported upstream](https://github.com/ryanbr/TwitchAdSolutions/issues/267)). Now exactly one runs, and an error inside a check no longer stops it. |
 
 Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
 

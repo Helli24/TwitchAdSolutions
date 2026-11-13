@@ -533,6 +533,78 @@ function mainTests(format) {
     rl.ctx.doTwitchPlayerTask(false, true);
     assert(rl.logs.join('|').endsWith('Reloading Twitch player (soft)'), 'a reload without a kind logs as before');
 
+    // Fork: one buffer monitor chain (68.12.1, ryanbr/TwitchAdSolutions#267). Runs the real
+    // monitorPlayerBuffering with fake timers; with no player found, a tick only does the cheap parts.
+    section('buffer monitor scheduling');
+    const makeMonitor = (options = {}) => {
+        const clock = { now: 0, nextId: 1, timers: new Map() };
+        const listeners = {};
+        const counts = { ticks: 0 };
+        const doc = { hidden: false, pictureInPictureElement: null, addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); } };
+        const ctx = format.loadMain(['playerForMonitoringBuffering', 'monitorTickTimer', 'scheduleMonitorTick', 'hookMonitorVisibility', 'monitorPlayerBuffering'], {
+            setTimeout: (fn, ms) => { const id = clock.nextId++; clock.timers.set(id, { at: clock.now + ms, fn }); return id; },
+            clearTimeout: (id) => clock.timers.delete(id),
+            document: doc,
+            getPlayerAndState: () => {
+                counts.ticks++;
+                if (options.throwOnTick && counts.ticks === options.throwOnTick) throw new Error('simulated failure inside a tick');
+                return null;
+            },
+            isActivelyStrippingAds: false,
+            playerBufferState: { isLive: false, inAdBreak: false },
+            updateAdblockBanner() {},
+            hideTwitchAdOverlays() {},
+            PlayerBufferingDelay: 600,
+            DisablePostBreakWedge: false
+        });
+        // Runs due timers in time order; an exception in a timer is swallowed like a browser does
+        const runUntil = (t) => {
+            // Guard: a scheduling bug can multiply the pending ticks; fail the check instead of hanging the run
+            for (let executed = 0; ; executed++) {
+                if (executed > 5000 || clock.timers.size > 500) {
+                    clock.timers.clear();
+                    counts.runaway = true;
+                    break;
+                }
+                let due = null;
+                for (const [id, timer] of clock.timers) {
+                    if (timer.at <= t && (!due || timer.at < due[1].at)) due = [id, timer];
+                }
+                if (!due) break;
+                clock.timers.delete(due[0]);
+                clock.now = due[1].at;
+                try { due[1].fn(); } catch {}
+            }
+            clock.now = t;
+        };
+        const tabReturn = () => (listeners.visibilitychange || []).forEach((fn) => fn());
+        return { ctx, clock, counts, doc, runUntil, tabReturn };
+    };
+    let mon = makeMonitor();
+    mon.ctx.monitorPlayerBuffering();
+    mon.runUntil(6000);
+    assert(!mon.counts.runaway, 'the number of pending ticks does not grow');
+    assertEq(mon.counts.ticks, 11, 'one chain: a tick every 600ms (11 in the first 6s incl. the start)');
+    assertEq(mon.clock.timers.size, 1, 'exactly one tick pending');
+    for (let i = 0; i < 10; i++) {
+        mon.tabReturn();
+        mon.runUntil(mon.clock.now + 200);
+    }
+    assertEq(mon.clock.timers.size, 1, 'after 10 tab returns still exactly one tick pending (upstream: one more chain per return)');
+    mon.counts.ticks = 0;
+    mon.runUntil(mon.clock.now + 6000);
+    assertEq(mon.counts.ticks, 10, 'and still 10 ticks per 6s (upstream measurement in #267: 110)');
+    mon.tabReturn();
+    const pendingAfterReturn = [...mon.clock.timers.values()][0];
+    assert(mon.clock.timers.size === 1 && pendingAfterReturn.at - mon.clock.now === 100, 'a tab return moves the pending tick to 100ms instead of adding one');
+    mon.doc.hidden = true;
+    mon.runUntil(mon.clock.now + 200);
+    assertEq([...mon.clock.timers.values()][0].at - mon.clock.now, 1800 - 100, 'hidden tab: the next tick comes after the 3x delay');
+    mon = makeMonitor({ throwOnTick: 3 });
+    mon.ctx.monitorPlayerBuffering();
+    mon.runUntil(3000);
+    assert(mon.counts.ticks >= 5 && mon.clock.timers.size === 1, 'an exception inside a tick does not end the chain (upstream: the chain stopped)');
+
     // Fork: user mute intent (68.9.1, input filter 68.10.3)
     section('trackUserMuteIntent');
     class HTMLVideoElement {}

@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 109;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 110;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -2585,7 +2585,32 @@ twitch-videoad.js text/javascript
             console.log('[AD DEBUG] Unhooked-worker check failed: ' + err.message);
         }
     }
+    // Buffer monitor scheduling. Exactly one tick is ever pending: scheduleMonitorTick() replaces the pending
+    // tick instead of adding one. Upstream scheduled the next tick at the end of every tick, and the tab-return
+    // handler ran an extra tick, which scheduled its own next tick too: every return to the tab started one more
+    // polling chain that never ended (ryanbr/TwitchAdSolutions#267: 11 chains after 10 tab returns). Parallel
+    // chains also run ticks milliseconds apart, so the playhead looks frozen and the stall counter reaches its
+    // threshold far too early. Each tick first schedules the next one at the normal delay (an exception inside
+    // the tick can no longer end the chain) and replaces it with the visibility-aware delay at its end.
+    let monitorTickTimer = null;
+    function scheduleMonitorTick(delayMs) {
+        clearTimeout(monitorTickTimer);
+        monitorTickTimer = setTimeout(monitorPlayerBuffering, delayMs);
+    }
+    // Run a tick 100ms after the tab becomes visible, so stalls are caught fast on return. It replaces the
+    // pending tick, so it does not start a second chain.
+    function hookMonitorVisibility() {
+        if (typeof document === 'undefined' || hookMonitorVisibility.done) return;
+        hookMonitorVisibility.done = true;
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                scheduleMonitorTick(100);
+            }
+        });
+    }
     function monitorPlayerBuffering() {
+        // Safety net: the next tick is scheduled before anything in this one can throw (see scheduleMonitorTick)
+        scheduleMonitorTick(PlayerBufferingDelay);
         // Fresh player lookup every tick (avoids stale ref when Twitch restarts its own player)
         playerForMonitoringBuffering = null;
         {
@@ -2883,16 +2908,8 @@ twitch-videoad.js text/javascript
             });
         }
         playerBufferState.isLive = isLive;
-        // Force immediate tick when tab becomes visible so stalls are caught fast on return
-        if (typeof document !== 'undefined' && !monitorPlayerBuffering.visibilityHooked) {
-            monitorPlayerBuffering.visibilityHooked = true;
-            document.addEventListener('visibilitychange', () => {
-                if (!document.hidden && !monitorPlayerBuffering.pendingTick) {
-                    monitorPlayerBuffering.pendingTick = true;
-                    setTimeout(() => { monitorPlayerBuffering.pendingTick = false; monitorPlayerBuffering(); }, 100);
-                }
-            });
-        }
+        // Force an early tick when the tab becomes visible so stalls are caught fast on return
+        hookMonitorVisibility();
         // Catch persistent ad-break overlays (e.g. "taking an ad break / stick around")
         // even after hasAds has transitioned to false. updateAdblockBanner only calls
         // hideTwitchAdOverlays during the active ad break; some overlays have their own
@@ -2906,7 +2923,7 @@ twitch-videoad.js text/javascript
         // background media deprioritization is browser-level. Negligible cost — only polls faster while hidden + in-break.
         const shouldThrottle = typeof document !== 'undefined' && document.hidden && !document.pictureInPictureElement && !playerBufferState.inAdBreak;
         const nextDelay = shouldThrottle ? PlayerBufferingDelay * 3 : PlayerBufferingDelay;
-        setTimeout(monitorPlayerBuffering, nextDelay);
+        scheduleMonitorTick(nextDelay);
     }
     // document.querySelector('video') returns the first <video> in the DOM, which since
     // July 2026 can be a separate Twitch ad element beside the player or in chat (#249).

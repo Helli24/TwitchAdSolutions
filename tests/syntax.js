@@ -7,17 +7,14 @@ const acorn = require('acorn');
 const ROOT = path.join(__dirname, '..');
 const USERSCRIPTS = [
     'vaft/vaft.user.js',
-    'vaft/vaft_testing.user.js',
     'vaft/twitch-brave-fix.user.js',
     'video-swap-new/video-swap-new.user.js',
     'strip/strip.user.js'
 ];
 const UBLOCK_RESOURCES = [
     'vaft/vaft-ublock-origin.js',
-    'vaft/vaft-testing-ublock-origin.js',
     'vaft/twitch-brave-fix-ublock-origin.js',
-    'video-swap-new/video-swap-new-ublock-origin.js',
-    'video-swap-new/video-swap-new-ublock-origin-testing.js'
+    'video-swap-new/video-swap-new-ublock-origin.js'
 ];
 
 let failed = 0;

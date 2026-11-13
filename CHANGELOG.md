@@ -1,5 +1,8 @@
 ## Unreleased
 
+### Removed
+- **Unmaintained testing variants** — `vaft/vaft_testing.user.js`, `vaft/vaft-testing-ublock-origin.js` and `video-swap-new/video-swap-new-ublock-origin-testing.js` were inherited from upstream (last changed in August 2026, before the fork), carried none of the fork's fixes and were neither linked in the README nor shipped in releases. An installed copy keeps running but gets no updates; install the release script from the README instead. The release scripts are unchanged
+
 ## v68.12.1 (2026-11-13)
 
 ### Fixed

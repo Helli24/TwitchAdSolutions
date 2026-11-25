@@ -37,7 +37,7 @@ twitch-videoad.js text/javascript
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 112;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 113;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -121,6 +121,8 @@ twitch-videoad.js text/javascript
         scope.PictureByPictureBackup = true;// Fork default: when every other backup type (autoplay included) carries ads, also try the 'picture-by-picture' player type (Twitch's mini player, 360p) as the very last one. Only together with PreferLowQualityBackup or LowQualityFirst. Opt-out: twitchAdSolutions_pictureByPictureBackup=false
         scope.KeepBackupSessions = true;// Fork default: keep an ad-laden backup session (its access token) instead of requesting a new one on every poll. Since Nov 2026 every new session starts with its own preroll, so a new token per poll kept every backup inside a preroll. A session is replaced only after BackupSessionMaxAdAgeMs. Opt-out: twitchAdSolutions_keepBackupSessions=false
         scope.BackupSessionMaxAdAgeMs = 60000;// Fork: an ad-laden backup session younger than this is kept (its preroll can still run out); an older one is replaced by a new access token
+        scope.WarmBackup = false;// Fork, opt-in test: keep one 360p (autoplay) backup session alive in the background so its own preroll is over when a midroll starts. Enable: twitchAdSolutions_warmBackup=true
+        scope.WarmBackupPollMs = 30000;// Fork: how often the warm backup session's playlist is fetched (text only)
         scope.RecoverySegmentsMaxAgeMs = 30000;// Fork: recovery segments older than this are not replayed (field log v110: segments cached 4.7 h earlier failed with HTTP 403 and the player showed Error #2000)
         scope.UntrackedAdReloads = [];// planUntrackedAdReload: timestamps of the reloads it asked for in the last 10 minutes
         scope.UntrackedAdReloadGaveUpAt = 0;// planUntrackedAdReload: last "giving up" log
@@ -194,6 +196,11 @@ twitch-videoad.js text/javascript
             BackupSessionStartedAt: Object.create(null),// Fork: per player type, when its cached backup session (access token) was requested
             AllBackupsAdLaden: false,// Fork: the last backup search found no clean type (every probed type carried ads); no early reload while true
             LoggedEarlyReloadSkipThisBreak: false,
+            BackupSessionAdSince: Object.create(null),// Fork: per player type, since when its kept session has carried ads (cleared when clean)
+            ActiveBackupWasClean: false,// Fork: the active backup's last committed playlist was clean; it is probed first on the next poll
+            WarmBackupState: null,// Fork (WarmBackup): { busy, lastPollAt, clean } of the background autoplay session
+            LoggedWarmAdsThisBreak: false,
+            LoggedWarmCleanThisBreak: false,
             ActiveBackupPlayerType: null,
             PinnedBackupPlayerType: null,
             LastCommittedBackupPlayerType: null,
@@ -368,6 +375,7 @@ twitch-videoad.js text/javascript
                     ${describeRequestUrl.toString()}
                     ${noteUntrackedPlaylist.toString()}
                     ${planUntrackedAdReload.toString()}
+                    ${warmBackupSession.toString()}
                     ${getStreamUrlForResolution.toString()}
                     ${processM3U8.toString()}
                     ${hookWorkerFetch.toString()}
@@ -397,6 +405,7 @@ twitch-videoad.js text/javascript
                     UntrackedReload = ${UntrackedReload};
                     PictureByPictureBackup = ${PictureByPictureBackup};
                     KeepBackupSessions = ${KeepBackupSessions};
+                    WarmBackup = ${WarmBackup};
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
                     SoftReloadNoStrip = ${SoftReloadNoStrip};
@@ -1284,6 +1293,70 @@ twitch-videoad.js text/javascript
         }
         return closestResolutionUrl;
     }
+    // Fork (WarmBackup, opt-in test): keep one 360p (autoplay) backup session alive in the background while the
+    // stream plays without ads. Since Nov 2026 every new session starts with its own preroll, so a backup requested
+    // at ad start is in its preroll for about as long as the ad break; a session started minutes earlier is past it.
+    // Polled every WarmBackupPollMs (playlist text only, no video). The probe loop finds it in
+    // BackupEncodingsM3U8Cache['autoplay'] at the next ad break. Worker-serialized.
+    async function warmBackupSession(streamInfo, url, realFetch) {
+        const state = streamInfo.WarmBackupState || (streamInfo.WarmBackupState = { busy: false, lastPollAt: 0, clean: null });
+        const resolution = streamInfo.Urls[url];
+        if (state.busy || !resolution || Date.now() - state.lastPollAt < WarmBackupPollMs) {
+            return;
+        }
+        state.busy = true;
+        state.lastPollAt = Date.now();
+        const type = 'autoplay';
+        try {
+            let encodings = streamInfo.BackupEncodingsM3U8Cache[type];
+            if (!encodings) {
+                const tokenResponse = await getAccessToken(streamInfo.ChannelName, type);
+                if (tokenResponse.status !== 200) {
+                    console.log('[AD DEBUG] Warm backup: access token HTTP ' + tokenResponse.status);
+                    return;
+                }
+                const token = await tokenResponse.json();
+                const spat = token?.data?.streamPlaybackAccessToken || token?.streamPlaybackAccessToken;
+                if (!spat) {
+                    console.log('[AD DEBUG] Warm backup: no access token in the response');
+                    return;
+                }
+                const usherUrl = new URL('https://usher.ttvnw.net/api/' + (V2API ? 'v2/' : '') + 'channel/hls/' + streamInfo.ChannelName + '.m3u8' + streamInfo.UsherParams);
+                usherUrl.searchParams.set('sig', spat.signature);
+                usherUrl.searchParams.set('token', spat.value);
+                const usherResponse = await realFetch(usherUrl.href);
+                if (usherResponse.status !== 200) {
+                    console.log('[AD DEBUG] Warm backup: usher HTTP ' + usherResponse.status);
+                    return;
+                }
+                encodings = streamInfo.BackupEncodingsM3U8Cache[type] = await usherResponse.text();
+                streamInfo.BackupSessionStartedAt[type] = Date.now();
+                delete streamInfo.BackupSessionAdSince[type];
+                state.clean = null;
+                console.log('[AD DEBUG] Warm backup: started a 360p (autoplay) session in the background, polled every ' + Math.round(WarmBackupPollMs / 1000) + 's so its own preroll is over before the next ad break');
+            }
+            const mediaResponse = await realFetch(getStreamUrlForResolution(encodings, resolution));
+            if (mediaResponse.status !== 200) {
+                console.log('[AD DEBUG] Warm backup: playlist HTTP ' + mediaResponse.status + ' — the session ended, a new one starts on the next poll');
+                streamInfo.BackupEncodingsM3U8Cache[type] = null;
+                return;
+            }
+            const clean = !hasAdTags(await mediaResponse.text());
+            if (clean) {
+                delete streamInfo.BackupSessionAdSince[type];
+            } else if (!streamInfo.BackupSessionAdSince[type]) {
+                streamInfo.BackupSessionAdSince[type] = Date.now();
+            }
+            if (clean !== state.clean) {
+                state.clean = clean;
+                console.log('[AD DEBUG] Warm backup: the autoplay session ' + (clean ? 'is clean' : 'is in an ad (its own preroll)') + ', started ' + Math.round((Date.now() - (streamInfo.BackupSessionStartedAt[type] || Date.now())) / 1000) + 's ago');
+            }
+        } catch (err) {
+            console.log('[AD DEBUG] Warm backup failed: ' + err.message);
+        } finally {
+            state.busy = false;
+        }
+    }
     // Core ad-blocking logic: detect ads in m3u8, fetch backup streams, strip ad segments
     async function processM3U8(url, textStr, realFetch) {
         const streamInfo = StreamInfosByUrl[url];
@@ -1359,6 +1432,9 @@ twitch-videoad.js text/javascript
         if (!haveAdTags && !streamInfo.IsShowingAd && textStr.indexOf('#EXTINF') !== -1) {
             streamInfo.LastCleanNativeM3U8 = textStr;
             streamInfo.LastCleanNativePlaylistAt = Date.now();
+            if (WarmBackup) {
+                warmBackupSession(streamInfo, url, realFetch);// not awaited: never delays the player's playlist
+            }
         }
         if (haveAdTags) {
             // Bounce-tolerant reset: keep PendingAdEndAt alive across short flips back to ad-marked
@@ -1631,6 +1707,18 @@ twitch-videoad.js text/javascript
                     }
                 }
             }
+            // Fork: a clean active backup is probed first, so a clean Source backup is not replaced by autoplay
+            // (field log: clean site committed, then autoplay 2s later because autoplay is probed first)
+            if (streamInfo.ActiveBackupPlayerType && streamInfo.ActiveBackupWasClean) {
+                const activeIdx = playerTypesToTry.indexOf(streamInfo.ActiveBackupPlayerType);
+                if (activeIdx > 0) {
+                    playerTypesToTry.splice(activeIdx, 1);
+                    playerTypesToTry.unshift(streamInfo.ActiveBackupPlayerType);
+                }
+                if (activeIdx >= 0) {
+                    startIndex = 0;
+                }
+            }
             for (let playerTypeIndex = startIndex; !backupM3u8 && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
                 const playerType = playerTypesToTry[playerTypeIndex];
                 const realPlayerType = playerType.replace('-CACHED', '');
@@ -1678,6 +1766,7 @@ twitch-videoad.js text/javascript
                                 if (encodingsM3u8Response.status === 200) {
                                     encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
                                     streamInfo.BackupSessionStartedAt[playerType] = Date.now();
+                                    delete streamInfo.BackupSessionAdSince[playerType];
                                     // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
                                     streamInfo.ConsecutiveTokenFetchFailures = 0;
                                     streamInfo.LoggedTokenFailureStreak = false;
@@ -1716,6 +1805,7 @@ twitch-videoad.js text/javascript
                                         fallbackM3u8 = m3u8Text;
                                     }
                                     if (!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) {
+                                        delete streamInfo.BackupSessionAdSince[playerType];
                                         if ((streamInfo.ConsecutiveAllStrippedPolls || 0) >= 1 && !hasAdTags(m3u8Text)) {
                                             const prevType = streamInfo.LastCommittedBackupPlayerType;
                                             if (prevType && prevType !== playerType) {
@@ -1734,6 +1824,14 @@ twitch-videoad.js text/javascript
                                         break;
                                     }
                                     if (hasAdTags(m3u8Text)) {
+                                        if (!streamInfo.BackupSessionAdSince[playerType]) {
+                                            streamInfo.BackupSessionAdSince[playerType] = Date.now();
+                                        }
+                                        const warmStartedAt = streamInfo.BackupSessionStartedAt[playerType] || 0;
+                                        if (WarmBackup && playerType === 'autoplay' && warmStartedAt && warmStartedAt < streamInfo.AdBreakStartedAt && !streamInfo.LoggedWarmAdsThisBreak) {
+                                            streamInfo.LoggedWarmAdsThisBreak = true;
+                                            console.log('[AD DEBUG] Warm backup did not help (yet) — the autoplay session started ' + Math.round((streamInfo.AdBreakStartedAt - warmStartedAt) / 1000) + 's before this break carries ads too');
+                                        }
                                         if (!streamInfo.LoggedBackupAdsByType) streamInfo.LoggedBackupAdsByType = new Set();
                                         if (!streamInfo.LoggedBackupAdsByType.has(playerType)) {
                                             streamInfo.LoggedBackupAdsByType.add(playerType);
@@ -1761,7 +1859,8 @@ twitch-videoad.js text/javascript
                                         }
                                     }
                                     // Fork (KeepBackupSessions): keep this session; a new token would start a new preroll
-                                    if (hasAdTags(m3u8Text) && KeepBackupSessions && Date.now() - (streamInfo.BackupSessionStartedAt[playerType] || 0) < BackupSessionMaxAdAgeMs) {
+                                    // (60s of ads in this session, not session age: a warm session started long ago keeps its chance)
+                                    if (hasAdTags(m3u8Text) && KeepBackupSessions && Date.now() - streamInfo.BackupSessionAdSince[playerType] < BackupSessionMaxAdAgeMs) {
                                         keepAdLadenSession = true;
                                     }
                                 }
@@ -1872,10 +1971,16 @@ twitch-videoad.js text/javascript
                     }
                 }
                 textStr = backupM3u8;
+                streamInfo.ActiveBackupWasClean = !hasAdTags(backupM3u8);
                 streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
                 if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
                     streamInfo.ActiveBackupPlayerType = backupPlayerType;
                     const backupHasAds = hasAdTags(backupM3u8);// Fork: an ad-laden commit is never pinned and says so in the log
+                    const warmStartedAt = streamInfo.BackupSessionStartedAt[backupPlayerType] || 0;
+                    if (WarmBackup && backupPlayerType === 'autoplay' && !backupHasAds && warmStartedAt && warmStartedAt < streamInfo.AdBreakStartedAt && !streamInfo.LoggedWarmCleanThisBreak) {
+                        streamInfo.LoggedWarmCleanThisBreak = true;
+                        console.log('[AD DEBUG] Warm backup worked — the autoplay session started ' + Math.round((streamInfo.AdBreakStartedAt - warmStartedAt) / 1000) + 's before this break is clean, playing it at 360p');
+                    }
                     const sourceQualityTypes = ['embed', 'site', 'popout'];
                     // Never pin 'autoplay' — must stay at the last position in playerTypesToTry
                     // so the iteration-end last-resort branch commits it when all Source types
@@ -2039,6 +2144,9 @@ twitch-videoad.js text/javascript
                 streamInfo.TotalAllStrippedPolls = 0;
                 streamInfo.AllBackupsAdLaden = false;
                 streamInfo.LoggedEarlyReloadSkipThisBreak = false;
+                streamInfo.ActiveBackupWasClean = false;
+                streamInfo.LoggedWarmAdsThisBreak = false;
+                streamInfo.LoggedWarmCleanThisBreak = false;
                 // Fork: recovery segments belong to this break; a later break must not replay them
                 streamInfo.RecoverySegments = [];
                 streamInfo.RecoveryStartSeq = undefined;
@@ -3721,6 +3829,10 @@ twitch-videoad.js text/javascript
         if (lsUntrackedReload === 'false') {
             UntrackedReload = false;
             console.log('[AD DEBUG] UntrackedReload disabled via localStorage — no player reload when an untracked playlist carries ads');
+        }
+        if (localStorage.getItem('twitchAdSolutions_warmBackup') === 'true') {
+            WarmBackup = true;
+            console.log('[AD DEBUG] WarmBackup enabled via localStorage (test) — a 360p backup session is kept alive in the background');
         }
         if (localStorage.getItem('twitchAdSolutions_keepBackupSessions') === 'false') {
             KeepBackupSessions = false;

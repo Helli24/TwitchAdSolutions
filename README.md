@@ -53,6 +53,7 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.12.1 | **No extra background work after tab switches.** Every return to the Twitch tab started another copy of vaft's player check that never stopped ([reported upstream](https://github.com/ryanbr/TwitchAdSolutions/issues/267)). Now exactly one runs, and an error inside a check no longer stops it. |
 | 68.12.2 | **No crash when every stream has ads.** In an ad break where even the 360p stream carried ads, vaft fed the player old video pieces from an earlier break, and the player stopped with Error #2000. Now it waits instead. New last fallback: Twitch's mini-player stream (360p, `pictureByPictureBackup`), tried only when every other stream has ads. |
 | 68.13.0 | **Calm when Twitch puts ads on every stream.** Since Nov 24 Twitch often serves ads on every backup stream (360p and mini-player included). vaft no longer restarts the backup streams on every check (which started a new ad each time), no longer switches between them, and no longer reloads the player when that cannot help. Far fewer requests to Twitch. |
+| 68.14.0 | **A clean full-quality backup is kept** instead of being swapped for 360p two seconds later. New test option `warmBackup` (off by default): a 360p backup kept ready in the background, to find out whether it is ad-free when an ad break starts mid-stream. |
 
 Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
 
@@ -107,6 +108,7 @@ Advanced settings (vaft):
 | `twitchAdSolutions_alignBackupSequence` | `true` | Renumber backup playlists onto the live numbering at the switch. *Fork.* |
 | `twitchAdSolutions_unhookedPageReload` | `true` | Allow the one-time page reload when vaft missed Twitch's video worker. *Fork.* |
 | `twitchAdSolutions_untrackedReload` | `true` | Reload the player (at most twice per 10 minutes) when an ad shows up in a playlist vaft does not track. *Fork.* |
+| `twitchAdSolutions_warmBackup` | `false` | Test: keep a 360p backup stream warm in the background (playlist only, every 30 s), so it may already be ad-free when an ad break starts mid-stream. *Fork.* |
 | `twitchAdSolutions_keepBackupSessions` | `true` | Keep a backup stream that currently shows ads instead of requesting a new one on every check (a new one starts with its own ad). *Fork.* |
 | `twitchAdSolutions_pictureByPictureBackup` | `true` | When every other backup stream carries ads, also try Twitch's mini-player stream (360p) as the last one. *Fork.* |
 | `twitchAdSolutions_errorRecovery` | `true` | Replace the player (at most twice per 10 minutes) when Twitch shows error #1000–#4000 after a vaft reload or during an ad break. *Fork.* |

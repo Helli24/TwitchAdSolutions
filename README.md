@@ -21,6 +21,9 @@
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
+> [!NOTE]
+> **Status (2026-11-25):** We have seen single ad breaks where every backup stream, including the 360p one, carried ads. vaft then shows a loading circle until the break ends. v68.12.2 tries one more fallback (Twitch's mini-player stream). If you see this, please [open an issue](https://github.com/Helli24/TwitchAdSolutions/issues/new) with the `[AD DEBUG]` console log.
+
 Fork of [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions) (archived). The script code is based on [ryanbr/TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions) v68.5.7 plus the fixes listed below. All update URLs point to this repository.
 
 **Don't combine Twitch specific ad blockers.**

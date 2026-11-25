@@ -1,3 +1,17 @@
+## v68.14.0 (2026-11-25)
+
+### Added
+- **Warm backup (test, opt-in)** (`warmBackup`, default off) — field log (v112): the kept backup sessions did turn clean once their own preroll was over, but at stream start all sessions began together, so the backups were clean only ~8 s before the native stream (63 s frozen). With `twitchAdSolutions_warmBackup=true`, vaft keeps one 360p (autoplay) backup session alive in the background while the stream plays without ads (`warmBackupSession()`, playlist text polled every 30 s, no video; not awaited, so it never delays the player's playlist). At the next midroll the probe loop finds it in the session cache; the log says whether it helped: `Warm backup worked — the autoplay session started Ns before this break is clean` or `Warm backup did not help (yet) — … carries ads too`. Start, the end of its own preroll and a dead session (`playlist HTTP …`, replaced on the next poll) are logged. It cannot help with the ad at stream start. vaft only
+
+### Changed
+- **A kept backup session is replaced after 60 s of ads, not 60 s of age** (`BackupSessionAdSince`), so a warm session started long before a break is not thrown away at the first ad-laden poll. vaft only
+
+### Fixed
+- **Clean Source backup replaced by autoplay** — field log (v112): a clean `site` backup was committed and replaced by `autoplay` (360p) 2 s later, because autoplay is always probed first. A clean active backup is now probed first and kept while it stays clean (`ActiveBackupWasClean`). vaft only
+
+### Tests
+- 609 checks: the field order (all ad-laden, then clean site, then clean autoplay: site stays; site ad-laden again: autoplay takes over), the warm backup off by default, its background start without delaying processM3U8, the 30 s poll interval, session reuse, a midroll using the warm session without a new token (and its log), a warm session with ads kept and logged, a dead session dropped. Each change was checked by reverting it: every revert fails the suite.
+
 ## v68.13.0 (2026-11-25)
 
 Since Nov 24, Twitch serves ads on every backup player type vaft can use (autoplay and picture-by-picture included), at least during prerolls; other blockers report the same. Every ad-laden backup playlist was a brand-new session at the start of its own preroll ("3 segs, seq 0..2" on every poll). This release makes vaft calm in that situation and stops it from restarting the backup sessions itself.

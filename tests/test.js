@@ -811,7 +811,7 @@ async function backupTests(format) {
     const W = format.loadWorker([
         'hasAdTags', 'getMatchedAdSignifiers', 'parseAttributes', 'getStreamUrlForResolution', 'stripAdSegments',
         'createStreamInfo', 'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl', 'noteUntrackedPlaylist',
-        'planUntrackedAdReload', 'videoCodecFamily', 'processM3U8'
+        'planUntrackedAdReload', 'videoCodecFamily', 'warmBackupSession', 'processM3U8'
     ]);
     const logs = [];
     W.console = { log: (m) => logs.push(String(m)), warn() {}, error() {} };
@@ -967,11 +967,11 @@ async function backupTests(format) {
     // Sessions that stay ad-laden longer than BackupSessionMaxAdAgeMs are replaced
     adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
     for (const type of Object.keys(info.BackupSessionStartedAt)) {
-        info.BackupSessionStartedAt[type] = Date.now() - W.BackupSessionMaxAdAgeMs - 1000;
+        info.BackupSessionAdSince[type] = Date.now() - W.BackupSessionMaxAdAgeMs - 1000;
     }
     requested.length = 0;
     await W.processM3U8(variantUrl, nativeAds(6004), realFetch);
-    assertEq(requested.length, 6, 'sessions ad-laden for longer than BackupSessionMaxAdAgeMs get a new token');
+    assertEq(requested.length, 6, 'sessions that carried ads for longer than BackupSessionMaxAdAgeMs get a new token');
     assertEq(W.BackupSessionMaxAdAgeMs, 60000, 'an ad-laden session is kept for up to 60s');
     // Post-reload minimal-requests window: an ad-laden first type no longer replaces the active backup
     info.ActiveBackupPlayerType = 'embed';
@@ -990,6 +990,81 @@ async function backupTests(format) {
     assertEq(requested.length, 12, 'opt-out: every poll requests a new token per type');
     W.KeepBackupSessions = true;
     await breakEnd(info, 7010);
+
+    section('clean active backup and warm backup (68.14.0)');
+    // Field log (v112): clean site committed, then autoplay 2s later because autoplay is probed first
+    // (every type was ad-laden first, so the contamination reorder does not move autoplay back)
+    info = newTrackedStream();
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    await W.processM3U8(variantUrl, nativeAds(7999), realFetch);
+    adTypes = new Set(['autoplay', 'popout', 'mobile_web', 'embed', 'picture-by-picture']);
+    await W.processM3U8(variantUrl, nativeAds(8000), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'site', 'autoplay ad-laden, site clean: site is committed');
+    adTypes = new Set(['popout', 'mobile_web', 'embed', 'picture-by-picture']);
+    logs.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(8001), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'site', 'autoplay turns clean too: the clean active site stays');
+    assert(!logs.some((l) => l.includes('Switch diag')), 'no switch while the active backup is clean');
+    adTypes = new Set(['site', 'popout', 'mobile_web', 'embed', 'picture-by-picture']);
+    await W.processM3U8(variantUrl, nativeAds(8002), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'autoplay', 'the active site carries ads again: the clean autoplay takes over');
+    await breakEnd(info, 8010);
+    assertEq(info.ActiveBackupWasClean, false, 'break end clears the clean mark');
+
+    // Warm backup: off by default, no background requests
+    info = newTrackedStream();
+    requested.length = 0;
+    await W.processM3U8(variantUrl, nativeClean(9000), realFetch);
+    await new Promise((resolve) => setImmediate(resolve));
+    assertEq(requested.length, 0, 'warm backup off (default): no background token request');
+    assertEq(W.WarmBackup, false, 'warm backup is off by default');
+    // On: a clean native poll starts the background autoplay session (not awaited by processM3U8)
+    W.WarmBackup = true;
+    adTypes = new Set(['autoplay']);
+    logs.length = 0;
+    await W.processM3U8(variantUrl, nativeClean(9001), realFetch);
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    assertDeepEq(requested, ['autoplay'], 'warm backup on: one autoplay token in the background');
+    assert(typeof info.BackupEncodingsM3U8Cache.autoplay === 'string', 'the session is cached for the probe loop');
+    assert(logs.some((l) => l.includes('Warm backup: started a 360p (autoplay) session')), 'the start is logged');
+    assert(logs.some((l) => l.includes('is in an ad (its own preroll)')), 'its own preroll is logged');
+    await W.processM3U8(variantUrl, nativeClean(9002), realFetch);
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+    assertEq(requested.length, 1, 'within WarmBackupPollMs: no second request');
+    adTypes = new Set();
+    info.WarmBackupState.lastPollAt = 0;
+    logs.length = 0;
+    await W.warmBackupSession(info, variantUrl, realFetch);
+    assertEq(requested.length, 1, 'the next poll reuses the session (no new token)');
+    assert(logs.some((l) => l.includes('the autoplay session is clean')), 'the end of its preroll is logged');
+    assertEq(W.WarmBackupPollMs, 30000, 'the warm session is polled every 30s');
+    // A midroll: the warm session (started before the break) is clean and used without a new token
+    info.BackupSessionStartedAt.autoplay = Date.now() - 120000;
+    adTypes = new Set(['site', 'popout', 'mobile_web', 'embed', 'picture-by-picture']);
+    logs.length = 0;
+    out = await W.processM3U8(variantUrl, nativeAds(9100), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'autoplay', 'midroll: the clean warm session is committed');
+    assertEq(requested.length, 1, 'midroll: no new token');
+    assert(out.includes('autoplay.backup.invalid/live-'), 'midroll: the player gets its live segments');
+    assert(logs.some((l) => l.includes('Warm backup worked') && l.includes('120s before this break')), 'success is logged with the session age');
+    await breakEnd(info, 9110);
+    // The warm session carries the midroll too: logged once, and kept (60s of ads, not session age)
+    info.WarmBackupState.lastPollAt = 0;
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    logs.length = 0;
+    requested.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(9200), realFetch);
+    assert(logs.some((l) => l.includes('Warm backup did not help (yet)')), 'a warm session with ads is logged');
+    assert(!requested.includes('autoplay'), 'the old warm session is kept instead of being replaced (a new one would start a preroll)');
+    await breakEnd(info, 9210);
+    // A dead session is dropped and replaced on the next warm poll
+    const deadFetch = async (url) => (url.includes('autoplay.backup.invalid') ? { status: 404, text: async () => '' } : realFetch(url));
+    info.WarmBackupState.lastPollAt = 0;
+    logs.length = 0;
+    await W.warmBackupSession(info, variantUrl, deadFetch);
+    assertEq(info.BackupEncodingsM3U8Cache.autoplay, null, 'a 404 drops the warm session');
+    assert(logs.some((l) => l.includes('Warm backup: playlist HTTP 404')), 'and is logged');
+    W.WarmBackup = false;
 
     section('stale recovery segments (68.12.2)');
     // Field sequence: break 1 has a clean backup (its live segments fill the recovery cache), the break

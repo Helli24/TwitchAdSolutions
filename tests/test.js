@@ -777,10 +777,169 @@ function mainTests(format) {
     assertEq(wd.logs.length, 0, 'no ad UI text in the player: nothing logged');
 }
 
+// ============================================================
+// Fork 68.12.2: the real processM3U8 through ad breaks, with mocked token and playlist requests.
+// Field log (v110): a midroll where all five backup types carried ads replayed recovery segments
+// cached 4.7 h earlier in a previous break; every one failed with HTTP 403 and the player showed
+// Error #2000. Also: picture-by-picture is tried as the very last backup type.
+// ============================================================
+async function backupTests(format) {
+    const W = format.loadWorker([
+        'hasAdTags', 'getMatchedAdSignifiers', 'parseAttributes', 'getStreamUrlForResolution', 'stripAdSegments',
+        'createStreamInfo', 'getBackupSequenceOffset', 'shiftMediaSequence', 'describeRequestUrl', 'noteUntrackedPlaylist',
+        'planUntrackedAdReload', 'videoCodecFamily', 'processM3U8'
+    ]);
+    const logs = [];
+    W.console = { log: (m) => logs.push(String(m)), warn() {}, error() {} };
+    const messages = [];
+    W.postMessage = (m) => messages.push(m);
+    const variantUrl = 'https://native.invalid/1080p60.m3u8';
+    const resolution = { Resolution: '1920x1080', FrameRate: 60, Codecs: 'avc1.64002A', Url: variantUrl };
+    const newTrackedStream = () => {
+        const info = W.createStreamInfo('chan', '', '?allow_source=true');
+        info.Urls[variantUrl] = resolution;
+        info.ResolutionList.push(resolution);
+        W.StreamInfosByUrl[variantUrl] = info;
+        return info;
+    };
+    // Playlists: segment titles 'live' or 'Amazon|1' (ad); the host names who served the segment
+    let pdtBase = Date.parse('2026-11-24T20:00:00.000Z');
+    const mediaPlaylist = (host, firstSeq, titles) => {
+        const lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:' + firstSeq];
+        if (titles.some((t) => t !== 'live')) {
+            lines.push('#EXT-X-DATERANGE:ID="stitched-ad-1",CLASS="twitch-stitched-ad",START-DATE="2026-11-24T20:00:00.000Z",DURATION=30.0,X-TV-TWITCH-AD-ROLL-TYPE="MIDROLL"');
+        }
+        titles.forEach((title, i) => {
+            lines.push('#EXT-X-PROGRAM-DATE-TIME:' + new Date(pdtBase + (firstSeq + i) * 2000).toISOString());
+            lines.push('#EXTINF:2.000,' + title);
+            lines.push('https://' + host + '/' + (title === 'live' ? 'live' : 'ad') + '-' + (firstSeq + i) + '.ts');
+        });
+        return lines.join('\n');
+    };
+    const nativeAds = (seq) => mediaPlaylist('native.invalid', seq, ['Amazon|1', 'Amazon|1', 'Amazon|1']);
+    const nativeClean = (seq) => mediaPlaylist('native.invalid', seq, ['live', 'live', 'live']);
+    let adTypes = new Set();
+    let failingTokenTypes = new Set();
+    const requested = [];
+    W.getAccessToken = async (channel, playerType) => {
+        requested.push(playerType);
+        if (failingTokenTypes.has(playerType)) return { status: 500, text: async () => 'error' };
+        return { status: 200, json: async () => ({ data: { streamPlaybackAccessToken: { signature: 'sig', value: playerType } } }) };
+    };
+    const realFetch = async (url) => {
+        const parsed = new URL(url);
+        if (parsed.hostname === 'usher.ttvnw.net') {
+            const type = parsed.searchParams.get('token');
+            return { status: 200, text: async () => '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=630000,RESOLUTION=640x360,CODECS="avc1.4D401E,mp4a.40.2",FRAME-RATE=30.000\nhttps://' + type + '.backup.invalid/360p.m3u8' };
+        }
+        const type = parsed.hostname.split('.')[0];
+        return { status: 200, text: async () => mediaPlaylist(type + '.backup.invalid', 100, adTypes.has(type) ? ['Amazon|1', 'Amazon|1', 'Amazon|1'] : ['live', 'live', 'live']) };
+    };
+    const allSourceTypes = ['autoplay', 'site', 'popout', 'mobile_web', 'embed'];
+    const breakEnd = async (info, seq) => {
+        for (let i = 0; i < 3 && info.IsShowingAd; i++) {
+            await W.processM3U8(variantUrl, nativeClean(seq + i), realFetch);
+        }
+    };
+
+    section('picture-by-picture backup (68.12.2)');
+    // Autoplay clean (the usual case): picture-by-picture is never requested
+    let info = newTrackedStream();
+    adTypes = new Set(['site', 'popout', 'mobile_web', 'embed']);
+    requested.length = 0;
+    let out = await W.processM3U8(variantUrl, nativeAds(1000), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'autoplay', 'autoplay clean: autoplay is committed');
+    assertDeepEq(requested, ['autoplay'], 'autoplay clean: only autoplay is requested');
+    assert(out.includes('autoplay.backup.invalid/live-'), 'autoplay clean: the player gets the autoplay segments');
+    await breakEnd(info, 1010);
+    assertEq(info.IsShowingAd, false, 'three clean polls end the break');
+
+    // Every other type carries ads: picture-by-picture is tried last and committed when clean
+    info = newTrackedStream();
+    adTypes = new Set(allSourceTypes);
+    requested.length = 0;
+    logs.length = 0;
+    out = await W.processM3U8(variantUrl, nativeAds(2000), realFetch);
+    assertDeepEq(requested, ['autoplay', 'site', 'popout', 'mobile_web', 'embed', 'picture-by-picture'], 'all others ad-laden: picture-by-picture is requested last');
+    assertEq(info.ActiveBackupPlayerType, 'picture-by-picture', 'a clean picture-by-picture is committed');
+    assert(out.includes('picture-by-picture.backup.invalid/live-'), 'the player gets the picture-by-picture segments');
+    assert(logs.some((l) => l.includes('Picture-by-picture backup committed')), 'the commit is logged');
+    assert(info.PinnedBackupPlayerType !== 'picture-by-picture', 'picture-by-picture is never pinned');
+    await breakEnd(info, 2010);
+
+    // Picture-by-picture carries ads too: the last-resort commit stays embed, as before 68.12.2
+    info = newTrackedStream();
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    requested.length = 0;
+    logs.length = 0;
+    out = await W.processM3U8(variantUrl, nativeAds(3000), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'picture-by-picture ad-laden too: embed is the last-resort commit');
+    assert(logs.some((l) => l.includes('(picture-by-picture too) — taking embed')), 'the last-resort commit is logged');
+    await breakEnd(info, 3010);
+
+    // Picture-by-picture token request fails: still embed
+    info = newTrackedStream();
+    adTypes = new Set(allSourceTypes);
+    failingTokenTypes = new Set(['picture-by-picture']);
+    out = await W.processM3U8(variantUrl, nativeAds(4000), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'picture-by-picture token fails: embed is the last-resort commit');
+    failingTokenTypes = new Set();
+    await breakEnd(info, 4010);
+
+    // Opt-out: picture-by-picture is not requested, the old last-resort path commits embed
+    W.PictureByPictureBackup = false;
+    info = newTrackedStream();
+    requested.length = 0;
+    logs.length = 0;
+    out = await W.processM3U8(variantUrl, nativeAds(5000), realFetch);
+    assert(!requested.includes('picture-by-picture'), 'opt-out: picture-by-picture is not requested');
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'opt-out: embed is the last-resort commit');
+    assert(logs.some((l) => l.includes('All backup player types ad-laden — taking embed')), 'opt-out: the unchanged last-resort log');
+    W.PictureByPictureBackup = true;
+    await breakEnd(info, 5010);
+
+    section('stale recovery segments (68.12.2)');
+    // Field sequence: break 1 has a clean backup (its live segments fill the recovery cache), the break
+    // ends, and break 2 has no clean source at all.
+    info = newTrackedStream();
+    adTypes = new Set(['site', 'popout', 'mobile_web', 'embed']);
+    await W.processM3U8(variantUrl, nativeAds(1830), realFetch);
+    assert(info.RecoverySegments.length > 0 && info.RecoverySegments[0].url.includes('autoplay.backup.invalid'), 'break 1: the recovery cache holds the autoplay segments');
+    assert(info.RecoverySegmentsAt > 0, 'break 1: the cache time is recorded');
+    await breakEnd(info, 1840);
+    assertDeepEq(info.RecoverySegments, [], 'break end: the recovery cache is emptied');
+    assertEq(info.RecoveryStartSeq, undefined, 'break end: the recovery sequence is cleared');
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    info.LastPlayerReload = Date.now() - 15 * 60 * 1000;// field: the next break came 15 minutes later
+    logs.length = 0;
+    out = await W.processM3U8(variantUrl, nativeAds(10244), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'break 2: every source has ads, embed is the last resort');
+    assert(!out.includes('autoplay.backup.invalid'), 'break 2: no segment from break 1 is replayed');
+    assert(!out.includes('/live-'), 'break 2: no recovery segment is appended (the ad segment lines stay; the fetch hook answers them with a blank segment)');
+    await breakEnd(info, 10260);
+
+    // Within one break: a cache older than RecoverySegmentsMaxAgeMs is dropped instead of replayed
+    W.AdSegmentCache = new Map();
+    const strip = newTrackedStream();
+    W.stripAdSegments(mediaPlaylist('native.invalid', 500, ['live', 'live', 'Amazon|1']), false, strip);
+    assertEq(strip.RecoverySegments.length, 2, 'live segments fill the cache');
+    let replay = W.stripAdSegments(mediaPlaylist('native.invalid', 503, ['Amazon|1', 'Amazon|1']), false, strip);
+    assert(replay.includes('native.invalid/live-500.ts') && replay.includes('#EXT-X-MEDIA-SEQUENCE:500'), 'a fresh cache is replayed with its sequence number');
+    strip.RecoverySegmentsAt = Date.now() - W.RecoverySegmentsMaxAgeMs - 1000;
+    logs.length = 0;
+    replay = W.stripAdSegments(mediaPlaylist('native.invalid', 505, ['Amazon|1', 'Amazon|1']), false, strip);
+    assert(!replay.includes('live-500.ts') && !replay.includes('#EXT-X-MEDIA-SEQUENCE:500'), 'a stale cache is not replayed');
+    assertDeepEq(strip.RecoverySegments, [], 'a stale cache is dropped');
+    assert(logs.some((l) => l.includes('Recovery segments are') && l.includes('not replaying')), 'dropping a stale cache is logged');
+    assertEq(W.RecoverySegmentsMaxAgeMs, 30000, 'recovery segments are replayed for at most 30s');
+}
+
+(async () => {
 for (const format of formats) {
     currentFormat = format.name;
     workerTests(format);
     mainTests(format);
+    await backupTests(format);
 }
 
 // Both formats must carry the same code (CLAUDE.md: synced pair)
@@ -791,3 +950,7 @@ assertDeepEq(pairDifferences, [], 'no code differences between the two formats')
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed > 0 ? 1 : 0);
+})().catch((err) => {
+    console.log('FAIL test run crashed: ' + (err && err.stack || err));
+    process.exit(1);
+});

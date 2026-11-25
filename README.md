@@ -48,6 +48,7 @@ Remove any older TwitchAdSolutions / vaft userscript first (for example from pix
 | 68.11.0 | **Paused players stay protected.** After 30 minutes of pause vaft forgot the stream, and the next ad after resuming played unblocked. The stream now stays registered, and if vaft ever meets an ad in a playlist it does not know (`untrackedReload`), it reloads the player once so blocking applies again. |
 | 68.12.0 | **Player error recovery** (`errorRecovery`). If the player stops with Twitch's error screen (for example Error #4000 on 1440p/HEVC streams at the start of an ad break) right after vaft reloaded it or during an ad break, vaft replaces the player once instead of leaving it dead. |
 | 68.12.1 | **No extra background work after tab switches.** Every return to the Twitch tab started another copy of vaft's player check that never stopped ([reported upstream](https://github.com/ryanbr/TwitchAdSolutions/issues/267)). Now exactly one runs, and an error inside a check no longer stops it. |
+| 68.12.2 | **No crash when every stream has ads.** In an ad break where even the 360p stream carried ads, vaft fed the player old video pieces from an earlier break, and the player stopped with Error #2000. Now it waits instead. New last fallback: Twitch's mini-player stream (360p, `pictureByPictureBackup`), tried only when every other stream has ads. |
 
 Details for every version are in the [CHANGELOG](CHANGELOG.md). Every version is also published as a [release](https://github.com/Helli24/TwitchAdSolutions/releases) with all scripts, a ZIP bundle and SHA-256 checksums.
 
@@ -102,6 +103,7 @@ Advanced settings (vaft):
 | `twitchAdSolutions_alignBackupSequence` | `true` | Renumber backup playlists onto the live numbering at the switch. *Fork.* |
 | `twitchAdSolutions_unhookedPageReload` | `true` | Allow the one-time page reload when vaft missed Twitch's video worker. *Fork.* |
 | `twitchAdSolutions_untrackedReload` | `true` | Reload the player (at most twice per 10 minutes) when an ad shows up in a playlist vaft does not track. *Fork.* |
+| `twitchAdSolutions_pictureByPictureBackup` | `true` | When every other backup stream carries ads, also try Twitch's mini-player stream (360p) as the last one. *Fork.* |
 | `twitchAdSolutions_errorRecovery` | `true` | Replace the player (at most twice per 10 minutes) when Twitch shows error #1000–#4000 after a vaft reload or during an ad break. *Fork.* |
 | `twitchAdSolutions_backupSwapFirst` | `true` | Swap to a backup stream on ad detect. `false` strips ad segments from the live stream instead (legacy). |
 | `twitchAdSolutions_fastAutoplayFirstTry` | `true` | After a break that needed 360p, try 360p first on the next break. |

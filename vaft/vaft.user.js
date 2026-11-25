@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/Helli24/TwitchAdSolutions
-// @version      68.12.1
+// @version      68.12.2
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/Helli24/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -47,7 +47,7 @@
         }
     }
     'use strict';
-    const ourTwitchAdSolutionsVersion = 110;// Used to prevent conflicts with outdated versions of the scripts
+    const ourTwitchAdSolutionsVersion = 111;// Used to prevent conflicts with outdated versions of the scripts
     console.log('[AD DEBUG] TwitchAdSolutions vaft v' + ourTwitchAdSolutionsVersion + ' loading');
     if (typeof window.twitchAdSolutionsVersion !== 'undefined' && window.twitchAdSolutionsVersion >= ourTwitchAdSolutionsVersion) {
         console.log('[AD DEBUG] CONFLICT: vaft v' + ourTwitchAdSolutionsVersion + ' skipped — another script already active (v' + window.twitchAdSolutionsVersion + '). Remove duplicate scripts.');
@@ -130,6 +130,8 @@
         scope.IsAdStrippingEnabled = true;
         scope.AdSegmentCache = new Map();
         scope.UntrackedReload = true;// Fork default: reload the player (max 2 per 10 min) when an untracked live playlist carries ad markers. Opt-out: twitchAdSolutions_untrackedReload=false
+        scope.PictureByPictureBackup = true;// Fork default: when every other backup type (autoplay included) carries ads, also try the 'picture-by-picture' player type (Twitch's mini player, 360p) as the very last one. Only together with PreferLowQualityBackup or LowQualityFirst. Opt-out: twitchAdSolutions_pictureByPictureBackup=false
+        scope.RecoverySegmentsMaxAgeMs = 30000;// Fork: recovery segments older than this are not replayed (field log v110: segments cached 4.7 h earlier failed with HTTP 403 and the player showed Error #2000)
         scope.UntrackedAdReloads = [];// planUntrackedAdReload: timestamps of the reloads it asked for in the last 10 minutes
         scope.UntrackedAdReloadGaveUpAt = 0;// planUntrackedAdReload: last "giving up" log
         scope.UntrackedPlaylists = Object.create(null);// Untracked-playlist diagnostic: described URL -> { firstAt, lastAdLogAt }
@@ -200,6 +202,7 @@
             NumStrippedAdSegments: 0,
             RecoverySegments: [],
             RecoveryStartSeq: undefined,// LOAD-BEARING: explicitly checked with `!== undefined`
+            RecoverySegmentsAt: 0,// Fork: when RecoverySegments was last filled; older segments are not replayed (RecoverySegmentsMaxAgeMs)
             FreezeStartedAt: 0,
             ConsecutiveAllStrippedPolls: 0,
             TotalAllStrippedPolls: 0,
@@ -416,6 +419,7 @@
                     LowQualityFirst = ${LowQualityFirst};
                     AlignBackupSequence = ${AlignBackupSequence};
                     UntrackedReload = ${UntrackedReload};
+                    PictureByPictureBackup = ${PictureByPictureBackup};
                     BackupSwapFirst = ${BackupSwapFirst};
                     DisableAdSpoofing = ${DisableAdSpoofing};
                     SoftReloadNoStrip = ${SoftReloadNoStrip};
@@ -1068,6 +1072,7 @@
         // so the player accepts injected recovery segments as the correct position in the stream)
         if (liveSegments.length > 0) {
             streamInfo.RecoverySegments = liveSegments.slice(-6);
+            streamInfo.RecoverySegmentsAt = Date.now();
             const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
             if (!isNaN(seq)) {
                 streamInfo.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - streamInfo.RecoverySegments.length);
@@ -1093,6 +1098,16 @@
                 console.log('[AD DEBUG] All segments stripped — reusing last clean native playlist (' + snapshotAge + 'ms old)');
                 streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
                 return streamInfo.LastCleanNativeM3U8;
+            }
+            // Fork: never replay stale recovery segments. The cache is only refilled while a break still has live
+            // segments. Field log (v110): in a break where every source carried ads, the segments replayed here had
+            // been cached 4.7 h earlier in a previous break; the player got HTTP 403 for each of them, showed Error
+            // #2000, and the error-recovery reloads got the same dead segments again.
+            const recoveryAgeMs = Date.now() - (streamInfo.RecoverySegmentsAt || 0);
+            if (streamInfo.RecoverySegments && streamInfo.RecoverySegments.length > 0 && recoveryAgeMs > RecoverySegmentsMaxAgeMs) {
+                console.log('[AD DEBUG] Recovery segments are ' + Math.round(recoveryAgeMs / 1000) + 's old — not replaying them (segments that old fail to load)');
+                streamInfo.RecoverySegments = [];
+                streamInfo.RecoveryStartSeq = undefined;
             }
             // Fallback: per-segment recovery cache (existing behavior)
             if (streamInfo.RecoverySegments && streamInfo.RecoverySegments.length > 0) {
@@ -1618,7 +1633,13 @@
             // fallback — mirrors pixeltris's original behavior. Source backups are tried first;
             // autoplay only kicks in when they're all ad-laden. Keeps Source quality when
             // available while guaranteeing a clean backup for heavy SSAI breaks.
-            const playerTypesToTry = (PreferLowQualityBackup || LowQualityFirst) ? [...BackupPlayerTypes, 'autoplay'] : [...BackupPlayerTypes];
+            // Fork (PictureByPictureBackup): 'picture-by-picture' (Twitch's mini player, 360p) goes after autoplay, so it is
+            // only requested when every other type carries ads (field log v110: all five did for a whole midroll). The
+            // reorders below only move autoplay or the pinned type to the front, and picture-by-picture is never pinned.
+            // An ad-laden picture-by-picture is never the last-resort commit: that stays the last other ad-laden type.
+            const playerTypesToTry = (PreferLowQualityBackup || LowQualityFirst) ? [...BackupPlayerTypes, 'autoplay', ...(PictureByPictureBackup ? ['picture-by-picture'] : [])] : [...BackupPlayerTypes];
+            let lastResortPlayerType = null;
+            let lastResortM3u8 = null;
             if (streamInfo.PinnedBackupPlayerType) {
                 const pinnedIndex = playerTypesToTry.indexOf(streamInfo.PinnedBackupPlayerType);
                 if (pinnedIndex > 0) {
@@ -1790,7 +1811,7 @@
                                     if (playerType == FallbackPlayerType) {
                                         fallbackM3u8 = m3u8Text;
                                     }
-                                    if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)) {
+                                    if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1 && playerType !== 'picture-by-picture')) {
                                         if ((streamInfo.ConsecutiveAllStrippedPolls || 0) >= 1 && !hasAdTags(m3u8Text)) {
                                             const prevType = streamInfo.LastCommittedBackupPlayerType;
                                             if (prevType && prevType !== playerType) {
@@ -1826,7 +1847,11 @@
                                     // caused the v58 freeze regression (issue #112) because the strip+recovery
                                     // loop would engage even when a clean alternate was available on another
                                     // player type.
-                                    if (hasAdTags(m3u8Text) && playerTypeIndex >= playerTypesToTry.length - 1) {
+                                    if (hasAdTags(m3u8Text) && playerType !== 'picture-by-picture') {
+                                        lastResortPlayerType = playerType;
+                                        lastResortM3u8 = m3u8Text;
+                                    }
+                                    if (hasAdTags(m3u8Text) && playerTypeIndex >= playerTypesToTry.length - 1 && playerType !== 'picture-by-picture') {
                                         console.log('[AD DEBUG] All backup player types ad-laden — taking ' + playerType + ' as last-resort fallback (strip+recovery path will engage)');
                                         backupPlayerType = playerType;
                                         backupM3u8 = m3u8Text;
@@ -1845,6 +1870,13 @@
                         break;
                     }
                 }
+            }
+            // Picture-by-picture was the last type and did not give a clean playlist: commit the last other ad-laden
+            // type instead, as the loop would have done without picture-by-picture.
+            if (!backupM3u8 && lastResortM3u8 && playerTypesToTry[playerTypesToTry.length - 1] === 'picture-by-picture') {
+                console.log('[AD DEBUG] All backup player types ad-laden (picture-by-picture too) — taking ' + lastResortPlayerType + ' as last-resort fallback (strip+recovery path will engage)');
+                backupPlayerType = lastResortPlayerType;
+                backupM3u8 = lastResortM3u8;
             }
             if (!backupM3u8 && fallbackM3u8) {
                 // Don't fall back to a type we've already marked contaminated this break.
@@ -1932,12 +1964,12 @@
                     // different ad-laden Source type at the new last position instead — user
                     // gets a Source-tier ad-marked backup (strip+recovery path engages,
                     // freezes likely) instead of the intended 360p clean autoplay backup.
-                    if ((PinBackupPlayerType && backupPlayerType !== 'autoplay') || sourceQualityTypes.includes(backupPlayerType)) {
+                    if ((PinBackupPlayerType && backupPlayerType !== 'autoplay' && backupPlayerType !== 'picture-by-picture') || sourceQualityTypes.includes(backupPlayerType)) {
                         streamInfo.PinnedBackupPlayerType = backupPlayerType;
                     }
                     console.log(`[AD DEBUG] Blocking${(streamInfo.IsMidroll ? ' midroll ' : ' ')}ads (${backupPlayerType}) — backup found in ${Date.now() - backupSearchStart}ms${backupColdTokenFetches > 0 ? ` (cold cache: ${backupColdTokenFetches} token fetch${backupColdTokenFetches > 1 ? 'es' : ''})` : ' (warm cache)'}`);
                     if (streamInfo.EscapeHatchFired) {
-                        const qualityTier = backupPlayerType === 'autoplay' ? '360p' : 'Source';
+                        const qualityTier = (backupPlayerType === 'autoplay' || backupPlayerType === 'picture-by-picture') ? '360p' : 'Source';
                         console.log('[AD DEBUG] Post-escape backup: ' + backupPlayerType + ' (' + qualityTier + ') — recovered from sticky-path freeze');
                     } else if (backupPlayerType === 'autoplay' && PreferLowQualityBackup) {
                         const sourceTried = streamInfo.LoggedBackupAdsByType?.size || 0;
@@ -1956,6 +1988,9 @@
                             // Full probe just ran — reset re-probe counter (we just tested Source-tier)
                             streamInfo.FastAutoplayConsecutive = 0;
                         }
+                    } else if (backupPlayerType === 'picture-by-picture') {
+                        // Not a Source-tier win: leave the fast-autoplay state as it is
+                        console.log('[AD DEBUG] Picture-by-picture backup committed — 360p, every other type (' + (streamInfo.LoggedBackupAdsByType ? [...streamInfo.LoggedBackupAdsByType].join(', ') : 'none') + ') carried ads');
                     } else if (FastAutoplayFirstTry && backupPlayerType !== 'autoplay') {
                         // Source-tier type committed cleanly — channel recovered. Reset the
                         // SSAI-uniform signal so next break does normal iteration. Also reset
@@ -2079,6 +2114,10 @@
                 streamInfo.EarlyReloadAwaitingResult = false;
                 streamInfo.EarlyReloadAtPoll = 0;
                 streamInfo.TotalAllStrippedPolls = 0;
+                // Fork: recovery segments belong to this break; a later break must not replay them
+                streamInfo.RecoverySegments = [];
+                streamInfo.RecoveryStartSeq = undefined;
+                streamInfo.RecoverySegmentsAt = 0;
                 streamInfo.CsaiOnlyThisBreak = false;
                 streamInfo.EscapeHatchFired = false;
                 streamInfo.HasLoggedAdAttributes = false;
@@ -2101,8 +2140,8 @@
                     // For autoplay (360p) specifically, the reload also restores Source
                     // quality (autoplay-scoped token only serves 360p variant ladder).
                     if (streamInfo.LastCommittedBackupPlayerType) {
-                        const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay';
-                        const reason = isAutoplay ? 'autoplay (360p) — restoring Source quality' : streamInfo.LastCommittedBackupPlayerType + ' — flushing MediaSource to prevent A/V desync accumulation';
+                        const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay' || streamInfo.LastCommittedBackupPlayerType === 'picture-by-picture';
+                        const reason = isAutoplay ? streamInfo.LastCommittedBackupPlayerType + ' (360p) — restoring Source quality' : streamInfo.LastCommittedBackupPlayerType + ' — flushing MediaSource to prevent A/V desync accumulation';
                         console.log('[AD DEBUG] End-of-break reload: ' + reason);
                         streamInfo.LastPlayerReload = Date.now();
                         if (!streamInfo.ReloadTimestamps) streamInfo.ReloadTimestamps = [];
@@ -3800,6 +3839,10 @@
         if (lsUntrackedReload === 'false') {
             UntrackedReload = false;
             console.log('[AD DEBUG] UntrackedReload disabled via localStorage — no player reload when an untracked playlist carries ads');
+        }
+        if (localStorage.getItem('twitchAdSolutions_pictureByPictureBackup') === 'false') {
+            PictureByPictureBackup = false;
+            console.log('[AD DEBUG] PictureByPictureBackup disabled via localStorage — picture-by-picture is not tried when every other backup type carries ads');
         }
         const lsAlignBackupSequence = localStorage.getItem('twitchAdSolutions_alignBackupSequence');
         if (lsAlignBackupSequence === 'false') {

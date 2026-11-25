@@ -1,4 +1,13 @@
-## Unreleased
+## v68.12.2 (2026-11-25)
+
+### Fixed
+- **Stale recovery segments replayed in a later ad break** — field log (v110): in a midroll where every backup type carried ads (autoplay included), `stripAdSegments` replayed its recovery segments, but they had been cached 4.7 h earlier in a previous break (sequence numbers 1846–1856 while the stream was at 10244). Each one failed with HTTP 403, the player stopped with Error #2000, and both error-recovery reloads got the same dead segments. The cache is only refilled while a break still has live segments and was never emptied. Now it is emptied at the end of every break, its fill time is recorded (`RecoverySegmentsAt`), and segments older than 30 s (`RecoverySegmentsMaxAgeMs`) are dropped instead of replayed (`Recovery segments are …s old — not replaying them`). In a break without any clean source the player now waits (loading circle) instead of failing. Inherited from upstream. vaft only
+
+### Added
+- **Picture-by-picture as the very last backup type** (`pictureByPictureBackup`, default on) — when every other type carries ads, vaft also requests the `picture-by-picture` player type (Twitch's mini player, 360p) and commits it if its playlist is clean (`Picture-by-picture backup committed`). It is requested only after autoplay and the four Source types have all been ad-laden, so a normal break costs nothing extra; it is never pinned, does not reset the fast-autoplay state, and an ad-laden picture-by-picture is never the last-resort commit (that stays the last other ad-laden type, e.g. embed). Whether Twitch serves it ad-free when all others carry ads is not verified yet; the log will show it. Only together with `preferLowQualityBackup` or `lowQualityFirst`. Opt-out: `twitchAdSolutions_pictureByPictureBackup=false`. vaft only
+
+### Tests
+- 509 checks: the real `processM3U8` through ad breaks with mocked token and playlist requests — autoplay clean (picture-by-picture never requested), all others ad-laden (picture-by-picture requested last and committed, not pinned), picture-by-picture ad-laden or its token failing (embed stays the last resort), the opt-out, and the field sequence (break 1 fills the cache, the break ends, break 2 without any clean source replays nothing from break 1). `stripAdSegments` drops a cache older than 30 s. Each change was checked by reverting it: every revert fails the suite.
 
 ### Removed
 - **Unmaintained testing variants** — `vaft/vaft_testing.user.js`, `vaft/vaft-testing-ublock-origin.js` and `video-swap-new/video-swap-new-ublock-origin-testing.js` were inherited from upstream (last changed in August 2026, before the fork), carried none of the fork's fixes and were neither linked in the README nor shipped in releases. An installed copy keeps running but gets no updates; install the release script from the README instead. The release scripts are unchanged

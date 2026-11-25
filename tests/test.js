@@ -606,6 +606,30 @@ function mainTests(format) {
     assert(mon.counts.ticks >= 5 && mon.clock.timers.size === 1, 'an exception inside a tick does not end the chain (upstream: the chain stopped)');
 
     // Fork: user mute intent (68.9.1, input filter 68.10.3)
+    // Fork 68.13.0: no loading-circle reload while the worker reports that every backup type carries ads
+    section('loading-circle reload during an ad break');
+    const loadingCircle = (allBackupsAdLaden) => {
+        const calls = [];
+        const video = { ended: false, readyState: 1, paused: true, networkState: 2, addEventListener() {}, __tasIntentHooked: true };
+        const player = { getHTMLVideoElement: () => video, isPaused: () => true, core: { state: {} } };
+        const state = { props: { content: { type: 'live' } } };
+        const ctx = format.loadMain(['playerForMonitoringBuffering', 'monitorTickTimer', 'scheduleMonitorTick', 'hookMonitorVisibility', 'monitorPlayerBuffering'], {
+            setTimeout: () => 1, clearTimeout() {},
+            document: { hidden: false, pictureInPictureElement: null, addEventListener() {} },
+            getPlayerAndState: () => ({ player, state }),
+            checkUnhookedPlayerWorker() {}, checkAdWatchdog() {}, checkPlayerErrorRecovery() {},
+            isActivelyStrippingAds: true,
+            playerBufferState: { isLive: true, inAdBreak: true, hasHadData: true, userPauseIntent: false, lastAdStallReloadAt: 0, lastReloadAt: 0, adStallStartAt: Date.now() - 4000, allBackupsAdLaden },
+            doTwitchPlayerTask: (...args) => calls.push(args),
+            updateAdblockBanner() {}, hideTwitchAdOverlays() {},
+            PlayerBufferingDelay: 600, PlayerBufferingMinRepeatDelay: 8000, DisablePostBreakWedge: true
+        });
+        ctx.monitorPlayerBuffering();
+        return calls;
+    };
+    assertDeepEq(loadingCircle(false), [[false, true, 'early']], 'a stalled player during an ad break is reloaded after 3s');
+    assertDeepEq(loadingCircle(true), [], 'no reload while every backup type carries ads');
+
     section('trackUserMuteIntent');
     class HTMLVideoElement {}
     const playerVideo = new HTMLVideoElement();
@@ -897,6 +921,75 @@ async function backupTests(format) {
     assert(logs.some((l) => l.includes('All backup player types ad-laden — taking embed')), 'opt-out: the unchanged last-resort log');
     W.PictureByPictureBackup = true;
     await breakEnd(info, 5010);
+
+    section('ad-laden backup sessions (68.13.0)');
+    // Field logs since Nov 24: every backup type carries ads, each new backup session is in its own preroll
+    // ("3 segs, seq 0..2" on every poll), and vaft requested a new token for every type on every poll.
+    const lastBanner = () => [...messages].reverse().find((m) => m.key === 'UpdateAdBlockBanner');
+    const earlyReloads = () => messages.filter((m) => m.key === 'ReloadPlayer' && m.kind === 'early').length;
+    info = newTrackedStream();
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    requested.length = 0;
+    logs.length = 0;
+    messages.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(6000), realFetch);
+    assertEq(requested.length, 6, 'poll 1: one access token per type');
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'poll 1: embed is the last resort');
+    assert(info.PinnedBackupPlayerType !== 'embed', 'an ad-laden last resort is not pinned');
+    assert(logs.some((l) => l.includes('Ad-laden backup committed (embed)')), 'an ad-laden commit says so');
+    assert(!logs.some((l) => l.includes('Autoplay backup committed') || l.includes('Picture-by-picture backup committed')), 'no success message for an ad-laden commit');
+    assertEq(info.AllBackupsAdLaden, true, 'the break is marked: every backup type carries ads');
+    assertEq(lastBanner().allBackupsAdLaden, true, 'the main thread is told (no loading-circle reload)');
+    assertEq(earlyReloads(), 0, 'no early reload while every backup type carries ads');
+    assert(logs.some((l) => l.includes('Early reload skipped')), 'the skipped early reload is logged');
+    requested.length = 0;
+    logs.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(6001), realFetch);
+    await W.processM3U8(variantUrl, nativeAds(6002), realFetch);
+    assertEq(requested.length, 0, 'polls 2-3: the ad-laden sessions are kept, no new access token');
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'polls 2-3: the active backup type stays (no embed/mobile_web switching)');
+    assert(!logs.some((l) => l.includes('Switch diag')), 'polls 2-3: no backup switch');
+    assertEq(earlyReloads(), 0, 'polls 2-3: still no early reload');
+    // The active type is kept even when another ad-laden type comes later in the order (field: embed <-> mobile_web)
+    info.ActiveBackupPlayerType = 'mobile_web';
+    logs.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(6002), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'mobile_web', 'every type ad-laden: the active backup type is kept, not the last one in the order');
+    assert(!logs.some((l) => l.includes('last-resort fallback')), 'keeping the active type logs nothing');
+    // A kept session's own preroll ends: it is used without a new token
+    adTypes = new Set(['site', 'popout', 'mobile_web', 'embed', 'picture-by-picture']);
+    out = await W.processM3U8(variantUrl, nativeAds(6003), realFetch);
+    assertEq(requested.length, 0, 'the kept autoplay session turns clean: still no new access token');
+    assertEq(info.ActiveBackupPlayerType, 'autoplay', 'the now clean autoplay session is committed');
+    assert(out.includes('autoplay.backup.invalid/live-'), 'the player gets its live segments');
+    assertEq(info.AllBackupsAdLaden, false, 'a clean commit clears the mark');
+    assertEq(lastBanner().allBackupsAdLaden, false, 'the main thread is told');
+    // Sessions that stay ad-laden longer than BackupSessionMaxAdAgeMs are replaced
+    adTypes = new Set([...allSourceTypes, 'picture-by-picture']);
+    for (const type of Object.keys(info.BackupSessionStartedAt)) {
+        info.BackupSessionStartedAt[type] = Date.now() - W.BackupSessionMaxAdAgeMs - 1000;
+    }
+    requested.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(6004), realFetch);
+    assertEq(requested.length, 6, 'sessions ad-laden for longer than BackupSessionMaxAdAgeMs get a new token');
+    assertEq(W.BackupSessionMaxAdAgeMs, 60000, 'an ad-laden session is kept for up to 60s');
+    // Post-reload minimal-requests window: an ad-laden first type no longer replaces the active backup
+    info.ActiveBackupPlayerType = 'embed';
+    info.LastPlayerReload = Date.now();
+    await W.processM3U8(variantUrl, nativeAds(6005), realFetch);
+    assertEq(info.ActiveBackupPlayerType, 'embed', 'right after a reload the ad-laden autoplay does not replace the active backup');
+    info.LastPlayerReload = 0;
+    await breakEnd(info, 6010);
+    assertEq(info.AllBackupsAdLaden, false, 'break end clears the mark');
+    // Opt-out: a new token per type on every poll, as before 68.13.0
+    W.KeepBackupSessions = false;
+    info = newTrackedStream();
+    requested.length = 0;
+    await W.processM3U8(variantUrl, nativeAds(7000), realFetch);
+    await W.processM3U8(variantUrl, nativeAds(7001), realFetch);
+    assertEq(requested.length, 12, 'opt-out: every poll requests a new token per type');
+    W.KeepBackupSessions = true;
+    await breakEnd(info, 7010);
 
     section('stale recovery segments (68.12.2)');
     // Field sequence: break 1 has a clean backup (its live segments fill the recovery cache), the break

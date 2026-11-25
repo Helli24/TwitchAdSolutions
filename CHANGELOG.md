@@ -1,3 +1,18 @@
+## v68.13.0 (2026-11-25)
+
+Since Nov 24, Twitch serves ads on every backup player type vaft can use (autoplay and picture-by-picture included), at least during prerolls; other blockers report the same. Every ad-laden backup playlist was a brand-new session at the start of its own preroll ("3 segs, seq 0..2" on every poll). This release makes vaft calm in that situation and stops it from restarting the backup sessions itself.
+
+### Changed
+- **Ad-laden backup sessions are kept** (`keepBackupSessions`, default on) — an ad-laden backup playlist used to throw its access token away, so every poll requested a new token for every type (field log: 66 GQL requests in 30 s) and every new session started its own preroll again. Now an ad-laden session is kept, so its preroll can run out, and is replaced by a new token only after it has carried ads for 60 s (`BackupSessionMaxAdAgeMs`). Opt-out: `twitchAdSolutions_keepBackupSessions=false`. vaft only
+- **No switching between ad-laden backups** — when every type carries ads, the active backup type is kept as the last resort instead of the last type in the probe order, and an ad-laden commit is never pinned (field log: embed and mobile_web alternated on every poll, each switch renumbering the playlist). Right after a reload, an unchecked ad-laden playlist no longer replaces an active backup. vaft only
+- **No reloads that cannot help** — while every backup type carries ads, the worker's early reload is skipped (`Early reload skipped — every backup type carries ads …`, once per break) and the main thread's loading-circle reload is suppressed (`allBackupsAdLaden` rides on the banner message): each reload only started another preroll. vaft only
+
+### Fixed
+- **Misleading success messages** — an ad-laden commit logged `Autoplay backup committed — 360p fallback …`; it now logs `Ad-laden backup committed (type) — no clean backup type right now, its ad segments are stripped`. The picture-by-picture commit message no longer lists picture-by-picture itself among the ad-laden types. vaft only
+
+### Tests
+- 563 checks: the real `processM3U8` through an all-ad-laden break — one token per type on the first poll and none on the next polls, the active type kept (no embed/mobile_web switching, not pinned, honest log), no early reload, the banner flag, a kept autoplay session turning clean and committed without a new token, sessions replaced after 60 s, the post-reload window, break end, the opt-out — and the real `monitorPlayerBuffering` skipping the loading-circle reload. Each change was checked by reverting it: every revert fails the suite.
+
 ## v68.12.2 (2026-11-25)
 
 ### Fixed

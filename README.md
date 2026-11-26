@@ -21,8 +21,8 @@
   <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
-> [!CAUTION]
-> **Status (2026-11-25):** Since Nov 24, Twitch often serves ads on every backup stream vaft can use (360p and the mini-player stream included), at least during prerolls. Other Twitch ad blockers see the same. vaft then shows a loading circle until the ad ends; v68.13.0 keeps this calm (no reload loops, far fewer requests). If you see something else, please [open an issue](https://github.com/Helli24/TwitchAdSolutions/issues/new) with the `[AD DEBUG]` console log.
+> [!NOTE]
+> **Status (2026-11-26):** On Nov 24–25, Twitch served ads on every backup stream vaft can use (the 360p one included), so ad breaks showed a loading circle until they ended. Since Nov 26 it looks normal again: the 360p backup is ad-free and breaks keep playing at 360p. If you still get a loading circle during ads, please [open an issue](https://github.com/Helli24/TwitchAdSolutions/issues/new) with the `[AD DEBUG]` console log.
 
 Fork of [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions) (archived). The script code is based on [ryanbr/TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions) v68.5.7 plus the fixes listed below. All update URLs point to this repository.
 

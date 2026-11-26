@@ -2356,6 +2356,7 @@ twitch-videoad.js text/javascript
         channelName: null,
         hasStreamStarted: false,
         position: 0,
+        positionAt: 0,
         bufferedPosition: 0,
         bufferDuration: 0,
         numSame: 0,
@@ -2944,12 +2945,16 @@ twitch-videoad.js text/javascript
                         // operates on currentTime which is already at live edge. Rate-limit collapses the spam to a
                         // single drift attempt per 30s window, leaving real-drift paths (buffer-gap seek, post-reload)
                         // unaffected since they call startDriftCorrection() directly without going through this detector.
-                        if (playerBufferState.position > 0 && position - playerBufferState.position > 5 && !playerBufferState.inAdBreak && (!playerBufferState.lastBackupSwitchAt || Date.now() - playerBufferState.lastBackupSwitchAt >= 10000) && (!playerBufferState.lastDriftStartedAt || Date.now() - playerBufferState.lastDriftStartedAt >= 30000)) {
-                            console.log('[AD DEBUG] Position jumped ' + (position - playerBufferState.position).toFixed(1) + 's — starting drift correction');
+                        // Compare against wall time: a hidden tab's timers can run once a minute, and
+                        // a minute of normal playback between ticks is not a jump (#74).
+                        const positionGain = position - playerBufferState.position - (Date.now() - playerBufferState.positionAt) / 1000;
+                        if (playerBufferState.position > 0 && positionGain > 5 && !playerBufferState.inAdBreak && (!playerBufferState.lastBackupSwitchAt || Date.now() - playerBufferState.lastBackupSwitchAt >= 10000) && (!playerBufferState.lastDriftStartedAt || Date.now() - playerBufferState.lastDriftStartedAt >= 30000)) {
+                            console.log('[AD DEBUG] Position jumped ' + positionGain.toFixed(1) + 's — starting drift correction');
                             startDriftCorrection(player.getHTMLVideoElement?.());
                             playerBufferState.lastDriftStartedAt = Date.now();
                         }
                         playerBufferState.position = position;
+                        playerBufferState.positionAt = Date.now();
                         playerBufferState.videoCurrentTime = videoCurrentTime;
                         playerBufferState.bufferedPosition = bufferedPosition;
                         playerBufferState.bufferDuration = bufferDuration;
@@ -2981,7 +2986,16 @@ twitch-videoad.js text/javascript
                 playerBufferState.wedgeActions = 0;
             }
             playerBufferState.wedgePrevInAdBreak = wedgeInAd;
-            if (!DisablePostBreakWedge && !wedgeInAd && (playerBufferState.wedgeEvalsRemaining || 0) > 0
+            // Chrome stops decoding video for a hidden page (outside Picture-in-Picture) while audio and
+            // currentTime keep going, which looks exactly like a wedge (#74). Skip those ticks and drop the
+            // baseline, so the first visible tick does not compare frames across the hidden span.
+            const wedgePageHidden = typeof document !== 'undefined' && document.hidden && !document.pictureInPictureElement;
+            if (wedgePageHidden) {
+                playerBufferState.wedgeLastTime = -1;
+                playerBufferState.wedgeLastFrames = -1;
+                playerBufferState.wedgeEvidence = 0;
+            }
+            if (!DisablePostBreakWedge && !wedgeInAd && !wedgePageHidden && (playerBufferState.wedgeEvalsRemaining || 0) > 0
                 && !playerBufferState.userPauseIntent && playerForMonitoringBuffering
                 && playerForMonitoringBuffering.state?.props?.content?.type === 'live') {
                 try {
@@ -3314,6 +3328,40 @@ twitch-videoad.js text/javascript
     function isRecoveryReloadKind(reloadKind) {
         return reloadKind === 'worker-recovery' || reloadKind === 'untracked-ads' || reloadKind === 'error-recovery';
     }
+    // Defer player reloads and pause/play while the page is hidden (issue #74).
+    // Chrome leaves a restarted live player Idle with no source while hidden, and play()
+    // does not wake it. The stream keeps playing if left alone, so queue the task and run
+    // it on the next visibilitychange. Recovery reloads (worker-recovery, untracked-ads,
+    // error-recovery) are not deferred — they must replace the player.
+    function deferTwitchPlayerTask(isPausePlay, isReload, reloadKind) {
+        const pending = deferTwitchPlayerTask.pending;
+        // Keep the strongest request: a forced reset beats a plain reload, which beats pause/play.
+        const forcesReset = isReload && isRecoveryReloadKind(reloadKind);
+        const rank = forcesReset ? 2 : isReload ? 1 : 0;
+        if (!pending || rank > pending.rank) {
+            if (!pending) console.log('[AD DEBUG] Page hidden — deferring player ' + (isReload ? 'reload (' + (reloadKind || 'normal') + ')' : 'pause/play') + ' until visible');
+            deferTwitchPlayerTask.pending = { isPausePlay, isReload, reloadKind, rank, channel: getPlaybackChannelName(getPlayerAndState()) || null };
+        }
+        if (deferTwitchPlayerTask.hooked) return;
+        deferTwitchPlayerTask.hooked = true;
+        document.addEventListener('visibilitychange', () => {
+            const task = deferTwitchPlayerTask.pending;
+            if (document.hidden || !task) return;
+            deferTwitchPlayerTask.pending = null;
+            // A break that started while hidden requests its own reload when it ends.
+            if (playerBufferState.inAdBreak) {
+                console.log('[AD DEBUG] Dropped deferred player task — an ad break is active');
+                return;
+            }
+            const channel = getPlaybackChannelName(getPlayerAndState()) || null;
+            if (task.channel && channel && task.channel !== channel) {
+                console.log('[AD DEBUG] Dropped deferred player task — channel changed');
+                return;
+            }
+            console.log('[AD DEBUG] Page visible — running deferred player task');
+            doTwitchPlayerTask(task.isPausePlay, task.isReload, task.reloadKind);
+        });
+    }
     // Pause/play or fully reload the Twitch player, preserving quality/volume settings
     function doTwitchPlayerTask(isPausePlay, isReload, reloadKind) {
         const playerAndState = getPlayerAndState();
@@ -3359,6 +3407,16 @@ twitch-videoad.js text/javascript
         }
         playerBufferState.lastFixTime = Date.now();
         playerBufferState.numSame = 0;
+        // Twitch leaves a restarted live player Idle with no source while the page is hidden, and
+        // play() does not wake it (issue #74, live Chrome repro). A pause/play restarts a live stream
+        // too. The stream keeps playing if left alone, so run the task once the page is visible again.
+        // Recovery reloads (worker-recovery, untracked-ads, error-recovery) must replace the player
+        // and are not deferred.
+        const forcesReset = isReload && isRecoveryReloadKind(reloadKind);
+        if ((isReload || isPausePlay) && document.hidden && !forcesReset) {
+            deferTwitchPlayerTask(isPausePlay, isReload, reloadKind);
+            return;
+        }
         if (isPausePlay) {
             player.pause();
             player.play()?.catch?.(() => {});
@@ -3451,11 +3509,16 @@ twitch-videoad.js text/javascript
             if ((reloadKind === 'early' || isRecoveryReloadKind(reloadKind)) && iosSoftReload) {
                 console.log('[AD DEBUG] iOS/iPadOS: downgrading hard reload to soft — keeps media element user-gesture-blessed (avoids black-screen + play-icon stall); access-token refresh is retained, so Source quality can still be restored. Opt-out: twitchAdSolutions_iosSoftReload=false');
             }
-            playerBufferState.lastReloadDesc = (hardReload ? 'hard' : 'soft') + ', ' + (reloadKind || 'no kind');
-            console.log('[AD DEBUG] Reloading Twitch player' + (hardReload ? ' (hard)' : ' (soft)') + (reloadKind ? ' — ' + reloadKind : ''));
+            // A new player instance built while the tab is hidden starts pre-muted and stays
+            // stopped until the tab is shown again, so a background listener loses the stream
+            // (#74). Keep the playing instance there; the token is still refreshed.
+            const newInstance = hardReload && !document.hidden;
+            const mode = newInstance ? 'hard' : (hardReload ? 'soft, tab hidden' : 'soft');
+            playerBufferState.lastReloadDesc = mode + ', ' + (reloadKind || 'no kind');
+            console.log('[AD DEBUG] Reloading Twitch player (' + mode + ')' + (reloadKind ? ' — ' + reloadKind : ''));
             // Pre-mute through hard reload to hide MSE-teardown audio click; restored on
             // `canplay` with 1500ms safety cap. Skipped if user already muted.
-            if (hardReload) {
+            if (newInstance) {
                 try {
                     const v = getPlayerVideoElement();
                     const wasInitiallyUnmuted = v && !v.muted;
@@ -3547,10 +3610,10 @@ twitch-videoad.js text/javascript
             // the media instance is reused (the iOS downgrade), so Twitch can still dispatch
             // the teardown pause. Unarmed, that reads as userPauseIntent and suppresses the
             // unmute backstop — muted stream on exactly the devices this path targets.
-            if (hardReload || refreshToken) {
+            if (newInstance || refreshToken) {
                 playerBufferState.weJustPaused = Date.now();
             }
-            playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: refreshToken });
+            playerState.setSrc({ isNewMediaPlayerInstance: newInstance, refreshAccessToken: refreshToken });
             postTwitchWorkerMessage('TriggeredPlayerReload');
             player.play()?.catch?.(() => {});
             // Always restore muted/volume state after reload — Chrome autoplay policy can force muted.
@@ -3590,7 +3653,7 @@ twitch-videoad.js text/javascript
                         if (videos.length > 0 && videos[0].buffered.length > 0 && videos[0].readyState >= 3) {
                             const liveEdge = videos[0].buffered.end(videos[0].buffered.length - 1);
                             const drift = liveEdge - videos[0].currentTime;
-                            if (hardReload && drift > 5 && Number.isFinite(liveEdge) && liveEdge < 3600) {
+                            if (newInstance && drift > 5 && Number.isFinite(liveEdge) && liveEdge < 3600) {
                                 console.log('[AD DEBUG] Post-hard-reload seek to live — ' + drift.toFixed(1) + 's behind, jumping to live edge to flush A/V drift');
                                 videos[0].currentTime = liveEdge;
                             } else if (drift > 2) {
